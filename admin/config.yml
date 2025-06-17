@@ -2,7 +2,7 @@ backend:
   name: github
   repo: usdiabeticexchange/usdiabeticexchange
   branch: main
-  auth_endpoint: https://usdiabeticexchange-oauth.vercel.app/auth
+  auth_endpoint: https://netlify-cms-oauth.vercel.app/auth
 
 media_folder: "public/images"
 public_folder: "/images"
