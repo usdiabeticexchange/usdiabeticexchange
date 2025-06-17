@@ -1,0 +1,84 @@
+backend:
+  name: github
+  repo: usdiabeticexchange/usdiabeticexchange
+  branch: main
+  auth_endpoint: https://usdiabeticexchange-oauth.vercel.app/auth
+
+media_folder: "public/images"
+public_folder: "/images"
+
+# Enable editorial workflow (optional)
+publish_mode: editorial_workflow
+
+collections:
+  # Company Settings - File-based editing
+  - name: "config"
+    label: "🏢 Company Settings"
+    files:
+      - label: "Company Information"
+        name: "company"
+        file: "content/company.json"
+        fields:
+          - {label: "Company Name", name: "name", widget: "string", hint: "Your business name"}
+          - {label: "Phone Number", name: "phone", widget: "string", hint: "Main business phone"}
+          - {label: "Email Address", name: "email", widget: "string", hint: "Contact email"}
+          - {label: "Street Address", name: "address", widget: "string"}
+          - {label: "City", name: "city", widget: "string"}
+          - {label: "State", name: "state", widget: "string"}
+          - {label: "ZIP Code", name: "zip", widget: "string"}
+          - {label: "Facebook URL", name: "facebook", widget: "string", required: false}
+          - {label: "Instagram URL", name: "instagram", widget: "string", required: false}
+
+      - label: "Website Headlines"
+        name: "homepage"
+        file: "content/homepage.json"
+        fields:
+          - {label: "Main Headline", name: "headline", widget: "string", hint: "Big text on homepage"}
+          - {label: "Subtitle", name: "subtitle", widget: "text", hint: "Smaller text under headline"}
+          - {label: "Button Text", name: "button_text", widget: "string", hint: "Call-to-action button"}
+
+  # Pricing Management
+  - name: "pricing"
+    label: "💰 Product Pricing"
+    files:
+      - label: "Test Strips Prices"
+        name: "test-strips"
+        file: "content/pricing/test-strips.json"
+        fields:
+          - label: "Test Strip Products"
+            name: "products"
+            widget: "list"
+            summary: "{{fields.name}} - {{fields.price}}"
+            fields:
+              - {label: "Product Name", name: "name", widget: "string"}
+              - {label: "Price", name: "price", widget: "string", hint: "Format: $25.00"}
+              - {label: "Notes", name: "notes", widget: "text", required: false}
+
+      - label: "Glucose Monitor Prices"
+        name: "glucose-monitors"
+        file: "content/pricing/glucose-monitors.json"
+        fields:
+          - label: "Glucose Monitor Products"
+            name: "products"
+            widget: "list"
+            summary: "{{fields.name}} - {{fields.price}}"
+            fields:
+              - {label: "Product Name", name: "name", widget: "string"}
+              - {label: "Price", name: "price", widget: "string", hint: "Format: $25.00"}
+              - {label: "Notes", name: "notes", widget: "text", required: false}
+
+      - label: "Insulin Supply Prices"
+        name: "insulin-supplies"
+        file: "content/pricing/insulin-supplies.json"
+        fields:
+          - label: "Insulin Supply Products"
+            name: "products"
+            widget: "list"
+            summary: "{{fields.name}} - {{fields.price}}"
+            fields:
+              - {label: "Product Name", name: "name", widget: "string"}
+              - {label: "Price", name: "price", widget: "string", hint: "Format: $25.00"}
+              - {label: "Notes", name: "notes", widget: "text", required: false}
+
+# GitHub backend configuration
+# local_backend: false # Disabled for GitHub Pages deployment
