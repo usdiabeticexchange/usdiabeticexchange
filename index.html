@@ -10,7 +10,7 @@
 
 <body>
   <div id="root"></div>
-<!-- Price sync from Google Sheets (preserves your green styling) -->
+<!-- Price sync from Google Sheets (fuzzy name match + preserves green styling) -->
 <script id="price-sync-google">
 (() => {
   console.log('[price-sync] inline script loaded');
@@ -24,11 +24,13 @@
     '6 months until expiration':   'price_6',
   };
 
+  // If a card title differs from the sheet’s “name”, map it here:
   const ALIAS = {
-    // 'Exact card title' : 'Exact sheet name'
+    // 'Card Title as shown on site': 'Exact name in Google Sheet',
   };
 
-  const norm = s => (s || '').toLowerCase().replace(/\s+/g,' ').trim();
+  // -------- helpers --------
+  const norm = s => (s || '').toLowerCase().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
   const toNum = v => {
     const n = Number(String(v ?? '').replace(/[^\d.]/g,''));
     return Number.isFinite(n) ? n : null;
@@ -40,13 +42,10 @@
   }
 
   function findPriceContainer(card){
-    // element that *visually* holds the price
     const cands = card.querySelectorAll(
       '[data-price], .price, .product-price, .price-value, .text-success, .text-green-600, .text-green-700, [class*="text-green"]'
     );
-    // prefer a green/price-ish element
     for (const el of cands) if (/\d/.test(el.textContent || '')) return el;
-    // otherwise, try any element whose text currently looks like a price
     for (const el of card.querySelectorAll('*')){
       if (/^\$?\d+(\.\d{1,2})?$/.test((el.textContent || '').trim())) return el;
     }
@@ -54,36 +53,20 @@
   }
 
   function findNumberNode(el){
-    // 1) a child span whose text is just the number (or $ + number)
     const exact = [...el.querySelectorAll('span, strong, b, i, em')]
       .find(n => /^\$?\d+(\.\d{1,2})?$/.test((n.textContent || '').trim()));
     if (exact) return exact;
-
-    // 2) a direct child text node with digits
     const tn = [...(el.childNodes || [])].find(n => n.nodeType===3 && /\d/.test(n.textContent || ''));
-    if (tn) return tn;
-
-    // 3) fallback: return container itself (we’ll replace its text)
-    return el;
+    return tn || el;
   }
 
   function setPrice(el, value){
     if (!el) return;
     const txt = fmt(value);
     const node = findNumberNode(el);
-
-    if (node === el){
-      // replace text only; keep element + classes
-      el.textContent = txt;
-    } else if (node.nodeType === 3){
-      node.textContent = txt;             // text node
-    } else {
-      node.textContent = txt;             // nested <span>/<strong>…
-    }
-
-    // ensure green/bold styling remains
+    node.textContent = txt;
     try {
-      const cls = el.classList;
+      const cls = (node===el ? el : el).classList;
       const hasGreen = [...cls].some(c => c==='text-success' || c.startsWith('text-green'));
       if (!hasGreen) cls.add('text-green-600','font-semibold');
     } catch {}
@@ -106,30 +89,64 @@
 
   function buildMap(rows){
     const map = new Map();
+    const keys = [];
     rows.forEach(r => {
-      const name = norm(r.name || r.Name || r.product || r.Product);
-      if (!name) return;
-      map.set(name, {
+      const k = norm(r.name || r.Name || r.product || r.Product);
+      if (!k) return;
+      map.set(k, {
+        rawName: (r.name || r.Name || r.product || r.Product || '').trim(),
         price_9plus: toNum(r.price_9plus ?? r['9+'] ?? r['9_plus'] ?? r['9 mo']),
         price_7to8:  toNum(r.price_7to8  ?? r['7-8'] ?? r['7_to_8'] ?? r['7-8 mo']),
         price_6:     toNum(r.price_6     ?? r['6']   ?? r['6 mo']),
       });
+      keys.push(k);
     });
-    return map;
+    return { map, keys };
   }
 
-  function findRowForCard(map, card){
+  // Very simple fuzzy: token overlap + number matches; ignores tiny stop-words
+  const STOP = new Set(['ct','box','pack','pk','only','kit','sets','set','and','or','of','the','mm','in']);
+  function tokens(s){
+    return norm(s).split(' ').filter(w => w.length>1 && !STOP.has(w));
+  }
+  function numbers(s){
+    return (s.match(/\d+/g) || []);
+  }
+  function pickBestKey(visibleName, keys){
+    const tw = tokens(visibleName);
+    const tn = new Set(numbers(visibleName));
+    let best = null, bestScore = 0;
+    for (const k of keys){
+      const kw = tokens(k);
+      const kn = new Set(numbers(k));
+      let score = 0;
+      for (const w of tw) if (kw.includes(w)) score += 1;
+      for (const n of tn) if (kn.has(n)) score += 2; // weight numbers
+      if (score > bestScore){
+        bestScore = score; best = k;
+      }
+    }
+    // require a minimum to avoid bad matches
+    return bestScore >= 2 ? best : null;
+  }
+
+  function findRowForCard(index, card){
     const nameEl = findNameEl(card);
     if (!nameEl) return null;
     const visible = (nameEl.textContent || '').trim();
-    const key = ALIAS[visible] || visible;
-    return map.get(norm(key)) || null;
+    const alias = ALIAS[visible] || visible;
+
+    const exact = index.map.get(norm(alias));
+    if (exact) return exact;
+
+    const fuzzyKey = pickBestKey(visible, index.keys);
+    return fuzzyKey ? index.map.get(fuzzyKey) : null;
   }
 
-  function applyPriceToCard(map, card){
+  function applyPriceToCard(index, card){
     const sel = card.querySelector('select');
     const col = EXP_MAP[dropdownLabel(sel)] || 'price_9plus';
-    const row = findRowForCard(map, card);
+    const row = findRowForCard(index, card);
     if (!row) { card.dataset.priceSyncMissing = '1'; return false; }
 
     const val = row[col] ?? row.price_9plus;
@@ -138,27 +155,36 @@
     const priceEl = findPriceContainer(card);
     if (!priceEl) return false;
 
-    // Only update if different
     const current = toNum((priceEl.textContent || '').trim());
     if (current === val) return false;
 
     setPrice(priceEl, val);
+
     if (sel && !sel.dataset.bound){
-      sel.addEventListener('change', () => applyPriceToCard(map, card));
+      sel.addEventListener('change', () => applyPriceToCard(index, card));
       sel.dataset.bound = '1';
     }
     return true;
   }
 
   function hydrate(rows){
-    const map = buildMap(rows);
+    const index = buildMap(rows);
 
     const applyAll = () => {
       const cards = findAllCards();
-      let changed = 0;
-      cards.forEach(c => { if (applyPriceToCard(map, c)) changed++; });
+      let changed = 0, missing = [];
+      cards.forEach(c => {
+        const ok = applyPriceToCard(index, c);
+        if (!ok && !findRowForCard(index, c)) {
+          const nameEl = findNameEl(c);
+          missing.push((nameEl?.textContent || '').trim());
+        }
+      });
       console.log('[price-sync] applied to', cards.length, 'cards');
-      console.log('[price-sync] changed', changed, 'prices');
+      console.log('[price-sync] changed', changed = document.querySelectorAll('[data-price-sync-missing]').length ? (cards.length - document.querySelectorAll('[data-price-sync-missing]').length) : cards.length, 'prices');
+      if (missing.length){
+        console.log('[price-sync] could not match these titles (add to ALIAS if needed):', [...new Set(missing)].slice(0,8));
+      }
     };
 
     // run now + for a handful of frames while SPA finishes
@@ -170,6 +196,16 @@
     // also watch for DOM changes (tab switches, lazy lists)
     const mo = new MutationObserver(applyAll);
     mo.observe(document.body, { childList:true, subtree:true });
+
+    // Expose a tiny debug helper
+    window.__priceSyncDebug = () => {
+      const cards = findAllCards();
+      return cards.slice(0,5).map(c => {
+        const name = (findNameEl(c)?.textContent || '').trim();
+        const fuzzy = pickBestKey(name, index.keys);
+        return { cardTitle: name, matchedSheetName: fuzzy || '(none)' };
+      });
+    };
   }
 
   function start(){
