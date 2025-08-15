@@ -10,30 +10,28 @@
 
 <body>
   <div id="root"></div>
-<!-- Price sync from Google Sheets (keeps your green styling & size) -->
+<!-- Price sync from Google Sheets (keeps green styling; robust for SPA) -->
 <script>
 (() => {
-  // --- 1) Your published CSV (leave as-is unless you republish) ---
+  // ===== CONFIG =====
   const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
+  const DEBUG = true;
 
-  // --- 2) Map your dropdown labels -> sheet columns ---
+  // Dropdown label -> sheet column
   const EXP_MAP = {
     '9+ months until expiration': 'price_9plus',
-    '9 months until expiration':  'price_9plus', // sometimes your UI shows this variant
+    '9 months until expiration':  'price_9plus',
     '7-8 months until expiration': 'price_7to8',
     '6 months until expiration':   'price_6',
   };
 
-  // --- 3) Optional: title aliases when a card title ≠ sheet product name ---
-  // LEFT = what the card shows, RIGHT = exact sheet product name
+  // If a visible card title doesn't exactly match the sheet "name", map it here
   const ALIAS = {
-    // 'OneTouch Ultra 50 Ct.': 'OneTouch Ultra 50 Ct.',
     // 'MMT-242': 'MMT 242',
+    // 'Contour Next 50 Ct.': 'Contour Next 50 Ct.'
   };
 
-  const DEBUG = false;
-
-  // ---------- helpers ----------
+  // ===== HELPERS =====
   const norm = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
   const toNum = v => {
     const s = String(v ?? '').replace(/[, ]/g, '').replace(/[^\d.]/g, '');
@@ -43,11 +41,11 @@
   };
   const fmt = n => '$' + Number(n).toFixed(2);
 
-  function labelFor(sel) {
+  const labelFor = sel => {
     if (!sel) return '9+ months until expiration';
     const opt = sel.selectedOptions?.[0] || sel.options?.[sel.selectedIndex];
     return (opt?.textContent || '').trim() || '9+ months until expiration';
-  }
+  };
 
   function findNameEl(card) {
     return card.querySelector(
@@ -56,7 +54,7 @@
   }
 
   function findPriceEl(card) {
-    // Prefer something that already looks like a price, keep its classes
+    // Prefer an element that already looks like the green price
     const cands = card.querySelectorAll(
       '[data-price], .price, .product-price, .price-value, .text-success, .text-green-600, .text-green-700, [class*="text-green"]'
     );
@@ -66,11 +64,10 @@
     return cands[0] || null;
   }
 
-  // ✅ Your “keep it green & don’t concatenate” setter
+  // ✅ Keep styling; avoid concatenating numbers
   function setPriceKeepingStyle(el, value) {
     if (!el) return;
-    el.textContent = fmt(value); // overwrite so we don’t get "$8.00" + "5.00"
-    // ensure it stays green/bold if not already styled that way
+    el.textContent = fmt(value);
     try {
       const cls = el.classList;
       const hasGreen = Array.from(cls).some(
@@ -80,7 +77,7 @@
     } catch {}
   }
 
-  // Find cards by walking up from the "Add to Sale" buttons
+  // Find card roots via "Add to Sale" buttons (reliable anchor)
   function findAllCards() {
     const btns = [...document.querySelectorAll('button')].filter(b =>
       /add to sale/i.test(b.textContent || '')
@@ -98,10 +95,10 @@
   function buildMap(rows) {
     const map = new Map();
     rows.forEach(r => {
-      const name = norm(r.name || r.Name || r.product || r.Product);
-      if (!name) return;
-      map.set(name, {
-        price_9plus: toNum(r.price_9plus ?? r['9+'] ?? r['9_plus'] ?? r['9 mo'] ?? r['price_9+']),
+      const key = norm(r.name || r.Name || r.product || r.Product);
+      if (!key) return;
+      map.set(key, {
+        price_9plus: toNum(r.price_9plus ?? r['price_9+'] ?? r['9+'] ?? r['9_plus'] ?? r['9 mo']),
         price_7to8:  toNum(r.price_7to8  ?? r['7-8'] ?? r['7_to_8'] ?? r['7-8 mo']),
         price_6:     toNum(r.price_6     ?? r['6']   ?? r['6 mo']   ?? r['6_months']),
       });
@@ -122,13 +119,11 @@
     if (!priceEl) return false;
 
     const sel = card.querySelector('select');
-    const label = labelFor(sel);
-    const col = EXP_MAP[label] || 'price_9plus';
+    const col = EXP_MAP[labelFor(sel)] || 'price_9plus';
 
     const row = rowForCard(map, card);
     if (!row) {
       card.dataset.priceSyncMissing = '1';
-      if (DEBUG) console.warn('[price-sync] no sheet row for', findNameEl(card)?.textContent?.trim());
       return false;
     }
 
@@ -144,38 +139,64 @@
     return true;
   }
 
+  function applyAll(map) {
+    const cards = findAllCards();
+    let changed = 0;
+    const missing = [];
+    for (const card of cards) {
+      const ok = applyOne(map, card);
+      if (ok) changed++;
+      if (card.dataset.priceSyncMissing === '1') {
+        const t = findNameEl(card)?.textContent?.trim();
+        if (t) missing.push(t);
+        delete card.dataset.priceSyncMissing;
+      }
+    }
+    if (DEBUG) {
+      console.log('[price-sync] applied to', cards.length, 'cards; changed', changed, 'prices');
+      if (missing.length) {
+        console.warn('[price-sync] could not match titles (add ALIAS if needed):', missing);
+      }
+    }
+  }
+
   function hydrate(rows) {
     const map = buildMap(rows);
 
-    const applyAll = () => {
-      const cards = findAllCards();
-      let changed = 0;
-      const missing = [];
-      cards.forEach(card => {
-        const ok = applyOne(map, card);
-        if (ok) changed++;
-        if (card.dataset.priceSyncMissing === '1') {
-          const name = findNameEl(card)?.textContent?.trim();
-          if (name) missing.push(name);
-          delete card.dataset.priceSyncMissing;
-        }
-      });
-      if (missing.length && DEBUG) {
-        console.warn('[price-sync] could not match these titles (add to ALIAS if needed):', missing);
-      }
-      if (DEBUG) console.log('[price-sync] applied to', cards.length, 'cards; changed', changed, 'prices');
-    };
+    // First pass now
+    applyAll(map);
 
-    applyAll();
-
-    // Re-apply as SPA renders more cards / tab switches
-    const mo = new MutationObserver(() => applyAll());
+    // Re-apply when SPA mutates DOM
+    const mo = new MutationObserver(() => applyAll(map));
     mo.observe(document.body, { childList: true, subtree: true });
+
+    // Little safety: re-run a few times while things settle
+    let tries = 0, max = 6;
+    const tick = () => { applyAll(map); if (++tries < max) setTimeout(tick, 1200); };
+    tick();
+
+    // Handy manual trigger
+    window.priceSyncForce = () => applyAll(map);
   }
 
-  function start() {
-    // Load CSV via PapaParse
-    function run() {
+  function startOnceCardsExist() {
+    // Wait until we actually see cards (SPA timing)
+    let checks = 0, maxChecks = 30;
+    const wait = () => {
+      if (findAllCards().length > 0) {
+        if (DEBUG) console.log('[price-sync] cards detected; starting CSV load');
+        loadCSV();
+      } else if (checks++ < maxChecks) {
+        setTimeout(wait, 500);
+      } else {
+        console.warn('[price-sync] no cards detected; gave up waiting');
+      }
+    };
+    wait();
+  }
+
+  function loadCSV() {
+    const run = () => {
       Papa.parse(CSV_URL + '&cb=' + Date.now(), {
         download: true,
         header: true,
@@ -183,8 +204,7 @@
         complete: res => hydrate(res.data),
         error: err => console.error('[price-sync] CSV load error', err),
       });
-    }
-
+    };
     if (typeof Papa === 'undefined') {
       const s = document.createElement('script');
       s.src = 'https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js';
@@ -196,10 +216,12 @@
     }
   }
 
+  // Boot
   if (DEBUG) console.log('[price-sync] inline script loaded');
-  start();
+  startOnceCardsExist();
 })();
 </script>
+
 
 
 
