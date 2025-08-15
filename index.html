@@ -15,10 +15,8 @@
 (() => {
   console.log('[price-sync] inline script loaded');
 
-  // 1) Your published CSV
   const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
 
-  // 2) Map dropdown labels -> sheet columns
   const EXP_MAP = {
     '9+ months until expiration': 'price_9plus',
     '9 months until expiration':  'price_9plus',
@@ -26,83 +24,87 @@
     '6 months until expiration':   'price_6',
   };
 
-  // 3) Optional title fixes (LEFT = card title, RIGHT = sheet name)
   const ALIAS = {
-    // 'Contour Next 100 Ct.': 'Contour Next 100 Ct.',
-    // 'MMT-242': 'MMT 242',
+    // 'Exact card title' : 'Exact sheet name'
   };
 
-  // ---------- helpers ----------
-  const norm = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const norm = s => (s || '').toLowerCase().replace(/\s+/g,' ').trim();
   const toNum = v => {
-    const n = Number(String(v ?? '').replace(/[^\d.]/g, ''));
+    const n = Number(String(v ?? '').replace(/[^\d.]/g,''));
     return Number.isFinite(n) ? n : null;
   };
   const fmt = n => '$' + Number(n).toFixed(2);
 
-  function findNameEl(card) {
+  function findNameEl(card){
     return card.querySelector('[data-product-name], .product-name, .card-title, h3, h4, .title');
   }
 
-  function findPriceEl(card) {
-    // Prefer existing green/price elements
-    const candidates = card.querySelectorAll(
+  function findPriceContainer(card){
+    // element that *visually* holds the price
+    const cands = card.querySelectorAll(
       '[data-price], .price, .product-price, .price-value, .text-success, .text-green-600, .text-green-700, [class*="text-green"]'
     );
-    for (const el of candidates) {
-      if (/\$\s*\d/.test((el.textContent || '').trim())) return el;
-    }
-    // Fallback: first element in the card that looks like a price
-    for (const el of card.querySelectorAll('*')) {
-      const t = (el.textContent || '').trim();
-      if (/^\$?\d+(\.\d{1,2})?$/.test(t)) return el;
+    // prefer a green/price-ish element
+    for (const el of cands) if (/\d/.test(el.textContent || '')) return el;
+    // otherwise, try any element whose text currently looks like a price
+    for (const el of card.querySelectorAll('*')){
+      if (/^\$?\d+(\.\d{1,2})?$/.test((el.textContent || '').trim())) return el;
     }
     return null;
   }
 
-  function labelFor(sel) {
+  function findNumberNode(el){
+    // 1) a child span whose text is just the number (or $ + number)
+    const exact = [...el.querySelectorAll('span, strong, b, i, em')]
+      .find(n => /^\$?\d+(\.\d{1,2})?$/.test((n.textContent || '').trim()));
+    if (exact) return exact;
+
+    // 2) a direct child text node with digits
+    const tn = [...(el.childNodes || [])].find(n => n.nodeType===3 && /\d/.test(n.textContent || ''));
+    if (tn) return tn;
+
+    // 3) fallback: return container itself (we’ll replace its text)
+    return el;
+  }
+
+  function setPrice(el, value){
+    if (!el) return;
+    const txt = fmt(value);
+    const node = findNumberNode(el);
+
+    if (node === el){
+      // replace text only; keep element + classes
+      el.textContent = txt;
+    } else if (node.nodeType === 3){
+      node.textContent = txt;             // text node
+    } else {
+      node.textContent = txt;             // nested <span>/<strong>…
+    }
+
+    // ensure green/bold styling remains
+    try {
+      const cls = el.classList;
+      const hasGreen = [...cls].some(c => c==='text-success' || c.startsWith('text-green'));
+      if (!hasGreen) cls.add('text-green-600','font-semibold');
+    } catch {}
+  }
+
+  function dropdownLabel(sel){
     const opt = sel?.options?.[sel.selectedIndex];
     return (opt ? opt.textContent : '').trim() || '9+ months until expiration';
   }
 
-  function setPrice(el, value) {
-    if (!el) return;
-    const txt = fmt(value);
-
-    // Replace only the text node to preserve styling
-    let t = Array.from(el.childNodes || []).find(n => n.nodeType === 3);
-    if (!t) {
-      t = document.createTextNode('');
-      el.appendChild(t);
-    }
-    t.textContent = txt;
-
-    // Keep price green/bold if not already green
-    try {
-      const cls = el.classList;
-      const hasGreen = Array.from(cls).some(
-        c => c === 'text-success' || c.startsWith('text-green')
-      );
-      if (!hasGreen) cls.add('text-green-600', 'font-semibold');
-    } catch {}
-  }
-
-  // ✅ Looser card discovery: find the button, then climb to a reasonable container.
-  function findAllCards() {
+  function findAllCards(){
     const btns = [...document.querySelectorAll('button')].filter(b =>
       /add to sale/i.test(b.textContent || '')
     );
-    const cards = btns
-      .map(b => (
-        b.closest('[data-product-card], .product-card, .bg-white, .card, .rounded, .border') ||
-        b.parentElement
-      ))
-      .filter(Boolean);
-    // unique
+    const cards = btns.map(b =>
+      b.closest('[data-product-card], .product-card, .bg-white, .card, .rounded, .border') || b.parentElement
+    ).filter(Boolean);
     return [...new Set(cards)];
   }
 
-  function buildMap(rows) {
+  function buildMap(rows){
     const map = new Map();
     rows.forEach(r => {
       const name = norm(r.name || r.Name || r.product || r.Product);
@@ -116,7 +118,7 @@
     return map;
   }
 
-  function findRowForCard(map, card) {
+  function findRowForCard(map, card){
     const nameEl = findNameEl(card);
     if (!nameEl) return null;
     const visible = (nameEl.textContent || '').trim();
@@ -124,79 +126,77 @@
     return map.get(norm(key)) || null;
   }
 
-  function applyPriceToCard(map, card) {
+  function applyPriceToCard(map, card){
     const sel = card.querySelector('select');
-    const priceEl = findPriceEl(card);
-    const label = labelFor(sel);
-    const col = EXP_MAP[label] || 'price_9plus';
-
+    const col = EXP_MAP[dropdownLabel(sel)] || 'price_9plus';
     const row = findRowForCard(map, card);
-    if (!row) { card.dataset.priceSyncMissing = '1'; return; }
+    if (!row) { card.dataset.priceSyncMissing = '1'; return false; }
 
     const val = row[col] ?? row.price_9plus;
-    if (val == null) return;
+    if (val == null) return false;
+
+    const priceEl = findPriceContainer(card);
+    if (!priceEl) return false;
+
+    // Only update if different
+    const current = toNum((priceEl.textContent || '').trim());
+    if (current === val) return false;
 
     setPrice(priceEl, val);
-
-    if (sel && !sel.dataset.bound) {
+    if (sel && !sel.dataset.bound){
       sel.addEventListener('change', () => applyPriceToCard(map, card));
       sel.dataset.bound = '1';
     }
+    return true;
   }
 
-  function hydrate(rows) {
+  function hydrate(rows){
     const map = buildMap(rows);
+
     const applyAll = () => {
       const cards = findAllCards();
-      cards.forEach(c => applyPriceToCard(map, c));
+      let changed = 0;
+      cards.forEach(c => { if (applyPriceToCard(map, c)) changed++; });
       console.log('[price-sync] applied to', cards.length, 'cards');
+      console.log('[price-sync] changed', changed, 'prices');
     };
 
-    // Try immediately + after SPA hydrates
+    // run now + for a handful of frames while SPA finishes
     applyAll();
-
-    // Run a few ticks while the SPA mounts
     let tries = 30;
-    const tick = () => {
-      applyAll();
-      if (--tries > 0) requestAnimationFrame(tick);
-    };
+    const tick = () => { applyAll(); if (--tries > 0) requestAnimationFrame(tick); };
     requestAnimationFrame(tick);
 
-    // Also watch for DOM mutations (tab switches, infinite lists, route changes)
+    // also watch for DOM changes (tab switches, lazy lists)
     const mo = new MutationObserver(applyAll);
-    mo.observe(document.body, { childList: true, subtree: true });
+    mo.observe(document.body, { childList:true, subtree:true });
   }
 
-  function start() {
-    function run() {
+  function start(){
+    function run(){
       Papa.parse(CSV_URL + '&cb=' + Date.now(), {
-        download: true,
-        header: true,
-        skipEmptyLines: true,
+        download:true, header:true, skipEmptyLines:true,
         complete: res => hydrate(res.data),
         error: err => console.error('[price-sync] CSV load error', err),
       });
     }
-    if (typeof Papa === 'undefined') {
+    if (typeof Papa === 'undefined'){
       const s = document.createElement('script');
       s.src = 'https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js';
       s.onload = run;
       s.onerror = () => console.error('[price-sync] Failed to load PapaParse');
       document.head.appendChild(s);
-    } else {
-      run();
-    }
+    } else run();
   }
 
-  // Start after the app begins rendering
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', start, { once: true });
+    document.addEventListener('DOMContentLoaded', start, { once:true });
   } else {
     start();
   }
 })();
 </script>
+
 
 
 
