@@ -11,21 +11,22 @@
 <body>
   <div id="root"></div>
 <!-- Price sync from Google Sheets (preserves your green styling) -->
-<script>
+<script id="price-sync-google">
 (() => {
-  // 1) Your published CSV (leave as-is unless you republish to a new URL)
+  console.log('[price-sync] inline script loaded');
+
+  // 1) Your published CSV
   const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
 
-  // 2) Map your dropdown labels -> sheet columns
+  // 2) Map dropdown labels -> sheet columns
   const EXP_MAP = {
     '9+ months until expiration': 'price_9plus',
-    '9 months until expiration':  'price_9plus', // sometimes your UI shows this variant
+    '9 months until expiration':  'price_9plus',
     '7-8 months until expiration': 'price_7to8',
     '6 months until expiration':   'price_6',
   };
 
-  // 3) Optional: if any card titles don’t exactly match the sheet “name”
-  //    add them here: LEFT = what the card displays, RIGHT = sheet name
+  // 3) Optional title fixes (LEFT = card title, RIGHT = sheet name)
   const ALIAS = {
     // 'Contour Next 100 Ct.': 'Contour Next 100 Ct.',
     // 'MMT-242': 'MMT 242',
@@ -40,13 +41,10 @@
   const fmt = n => '$' + Number(n).toFixed(2);
 
   function findNameEl(card) {
-    return card.querySelector(
-      '[data-product-name], .product-name, .card-title, h3, h4, .title'
-    );
+    return card.querySelector('[data-product-name], .product-name, .card-title, h3, h4, .title');
   }
 
   function findPriceEl(card) {
-    // Prefer an existing price element (green text, “price” classes, etc.)
     const candidates = card.querySelectorAll(
       '[data-price], .price, .product-price, .price-value, .text-success, .text-green-600, .text-green-700, [class*="text-green"]'
     );
@@ -65,7 +63,7 @@
     if (!el) return;
     const txt = fmt(value);
 
-    // Update only the text node so classes/children remain intact
+    // Replace only the text node to preserve styling
     let t = Array.from(el.childNodes || []).find(n => n.nodeType === 3);
     if (!t) {
       t = document.createTextNode('');
@@ -73,7 +71,7 @@
     }
     t.textContent = txt;
 
-    // Ensure it stays green if the element didn’t have a green class
+    // Keep price green/bold if not already green
     try {
       const cls = el.classList;
       const hasGreen = Array.from(cls).some(
@@ -83,14 +81,13 @@
     } catch {}
   }
 
-  // Robustly find all “cards” by starting from the “Add to Sale” buttons
+  // Find cards via "Add to Sale" button → walk up to the card container
   function findAllCards() {
     const btns = [...document.querySelectorAll('button')].filter(b =>
       /add to sale/i.test(b.textContent || '')
     );
     const cards = [];
     for (const btn of btns) {
-      // best guess parent that also holds name/select/price
       let el = btn.closest('[data-product-card], .product-card, .bg-white, .card') || btn.parentElement;
       for (let i = 0; i < 8 && el; i++) {
         const nameEl = findNameEl(el);
@@ -153,9 +150,11 @@
     const applyAll = () => findAllCards().forEach(c => applyPriceToCard(map, c));
     applyAll();
 
-    // Handle tab switches / infinite lists / route changes
+    // React/Vue route swaps, lazy lists, etc.
     const mo = new MutationObserver(applyAll);
     mo.observe(document.body, { childList: true, subtree: true });
+
+    console.log('[price-sync] applied to', findAllCards().length, 'cards');
   }
 
   function start() {
@@ -182,6 +181,7 @@
   start();
 })();
 </script>
+
 
 
 
