@@ -10,7 +10,7 @@
 
 <body>
   <div id="root"></div>
-<!-- Price sync from Google Sheets (robust matching + safe replace) -->
+<!-- Price sync from Google Sheets (dropdown-anchored + safe replace) -->
 <script>
 (() => {
   const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
@@ -22,7 +22,7 @@
     '6 months until expiration':   'price_6',
   };
 
-  // If any card title doesn't match your sheet exactly, map it here:
+  // Add any special title -> sheet name fixes here if needed
   const ALIAS = {
     // 'MMT-242': 'MMT-242',
     // 'OneTouch Ultra 50 Ct.': 'OneTouch Ultra 50 Ct.',
@@ -37,7 +37,7 @@
   };
   const fmt = n => '$' + Number(n).toFixed(2);
 
-  // Replace the first $… number inside el (or its children) without nuking classes
+  // Replace the first $… in the element (or children) without killing classes
   function replaceCurrency(el, text){
     const stack = [el, ...el.querySelectorAll('*')];
     for (const node of stack) {
@@ -48,7 +48,6 @@
         return true;
       }
     }
-    // Fallback: set outer text (preserves parent classes but removes inner nodes)
     el.textContent = text;
     try { el.classList.add('text-green-600','font-semibold'); } catch {}
     return true;
@@ -69,15 +68,13 @@
     return (opt ? opt.textContent : '').trim() || '9+ months until expiration';
   }
 
-  // Build sheet rows with precomputed tokens
-  const STOP = new Set(['test','tests','strip','strips','meter','sensors','sensor','pack','pk','ct','count','mm','in','only','kit','cartridges','infusion','set','sets','box','sealed','big','100','50','25','10','5']); // tune as needed
-  function tokenize(s){
-    return norm(s).split(' ').filter(w => w && !STOP.has(w));
-  }
+  // Build a searchable index from the sheet
+  const STOP = new Set(['test','tests','strip','strips','meter','sensors','sensor','pack','pk','ct','count','mm','in','only','kit','cartridges','infusion','set','sets','box','sealed','big','100','50','25','10','5']);
+  const tokenize = s => norm(s).split(' ').filter(w => w && !STOP.has(w));
 
   function buildIndex(rows){
     const list = [];
-    const map = new Map(); // exact keys
+    const map = new Map();
     rows.forEach(r => {
       const productName = r.product_name ?? r.name ?? r.product ?? r.Product ?? r.Name;
       const key = r.product_key;
@@ -92,14 +89,12 @@
       const sKey  = slug(key);
       if (nName) map.set(`name::${nName}`, row);
       if (sKey)  map.set(`key::${sKey}`,  row);
-      // for fuzzy matching
       row._tokens = tokenize(productName || key || '');
       list.push(row);
     });
     return {list, map};
   }
 
-  // Fuzzy match by token overlap; return best scoring row (>= 1)
   function fuzzyMatch(index, title){
     const tks = tokenize(title);
     let best = null, bestScore = 0;
@@ -111,29 +106,25 @@
     return bestScore >= 1 ? best : null;
   }
 
+  // NEW: anchor on the expiration dropdowns (reliable on each card)
   function findAllCards(){
-    const btns = [...document.querySelectorAll('button')].filter(b => /add to sale/i.test(b.textContent || ''));
-    const cards = [];
-    for (const btn of btns) {
-      let el = btn.closest('[data-product-card], .product-card, .card, .bg-white') || btn.parentElement;
+    const set = new Set();
+    document.querySelectorAll('select').forEach(sel => {
+      let el = sel.closest('[data-product-card], .product-card, .card, .bg-white') || sel.parentElement;
       for (let i = 0; i < 8 && el; i++) {
-        if (findNameEl(el) && findPriceEl(el) && el.querySelector('select')) break;
+        if (findNameEl(el) && findPriceEl(el)) { set.add(el); break; }
         el = el.parentElement;
       }
-      if (el && !cards.includes(el)) cards.push(el);
-    }
-    return cards;
+    });
+    return [...set];
   }
 
   function resolveRow(index, visibleTitle){
     const aliased = ALIAS[visibleTitle] || visibleTitle;
-    // exact by name
     const byName = index.map.get(`name::${norm(aliased)}`);
     if (byName) return byName;
-    // exact by key (slug of visible title)
-    const byKey = index.map.get(`key::${slug(aliased)}`);
+    const byKey  = index.map.get(`key::${slug(aliased)}`);
     if (byKey) return byKey;
-    // fuzzy fallback
     return fuzzyMatch(index, aliased);
   }
 
@@ -164,16 +155,16 @@
 
   function hydrate(rows){
     const index = buildIndex(rows);
-    const cards = findAllCards();
-    let changed = 0;
-    for (const c of cards) if (applyPriceToCard(index, c)) changed++;
-    console.log('[price-sync] applied to', cards.length, 'cards; changed', changed, 'prices');
+    const applyAll = (logTag='') => {
+      const cards = findAllCards();
+      let changed = 0;
+      for (const c of cards) if (applyPriceToCard(index, c)) changed++;
+      console.log('[price-sync] applied to', cards.length, 'cards;', 'changed', changed, 'prices', logTag);
+    };
 
-    const mo = new MutationObserver(() => {
-      let ch = 0;
-      for (const c of findAllCards()) if (applyPriceToCard(index, c)) ch++;
-      if (ch) console.log('[price-sync] changed', ch, 'prices (mutation)');
-    });
+    applyAll('(initial)');
+
+    const mo = new MutationObserver(() => applyAll('(mutation)'));
     mo.observe(document.body, { childList:true, subtree:true });
   }
 
