@@ -10,80 +10,133 @@
 
 <body>
   <div id="root"></div>
-<!-- Price sync from Google Sheets (preserves styling) -->
+<!-- Price sync from Google Sheets (fuzzy match, keeps green styling) -->
 <script>
 (() => {
   const CSV_URL =
     'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
 
-  // Map dropdown text -> sheet column
-  const EXP_MAP = {
-    '9+ months until expiration': 'price_9plus',
-    '9 months until expiration':  'price_9plus',
-    '7-8 months until expiration': 'price_7to8',
-    '6 months until expiration':   'price_6',
-  };
+  // Keywords that identify the expiration bucket inside the select option text
+  const EXP_KEYS = [
+    { test: /9\+|\b9\s*months?/i, col: 'price_9plus' },
+    { test: /\b7\s*[-–]\s*8|\b7-8/i, col: 'price_7to8' },
+    { test: /\b6\s*months?/i, col: 'price_6' }
+  ];
 
-  // Optional title fixes if a card label differs from sheet “name”
+  // Optional manual fixes if a card title differs a lot from sheet “name”
   const ALIAS = {
-    // 'OneTouch Ultra 50 Ct.': 'OneTouch Ultra 50 Ct.',
+    // 'MMT-242': 'MMT 242',
+    // 'Accu-Chek Guide 100 Ct.': 'Accu-Chek Guide 100 Ct.',
   };
 
   // ---------- helpers ----------
-  const norm = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const norm = s =>
+    (s || '')
+      .toLowerCase()
+      .replace(/™|®/g, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
   const toNum = v => {
     const n = Number(String(v ?? '').replace(/[^\d.]/g, ''));
     return Number.isFinite(n) ? n : null;
   };
+
   const fmt = n => '$' + Number(n).toFixed(2);
 
-  // Find parts of a card (be liberal with selectors)
   function findNameEl(card) {
     return card.querySelector('[data-product-name], .product-name, .card-title, h3, h4, .title');
   }
   function findPriceEl(card) {
-    // prefer an element that already looks like the price
     const cands = card.querySelectorAll(
       '[data-price], .price, .product-price, .price-value, .text-success, .text-green-600, .text-green-700, [class*="text-green"]'
     );
     for (const el of cands) {
-      if (/\$\s*\d/.test((el.textContent||'').trim())) return el;
+      if (/\$\s*\d/.test((el.textContent || '').trim())) return el;
     }
     return cands[0] || null;
   }
   function findSelect(card) {
-    // some builds render a real <select>, some a custom component — if none, default to 9+
     return card.querySelector('select');
   }
-  function currentLabel(sel) {
-    const t = sel?.options?.[sel.selectedIndex]?.textContent?.trim();
-    return t || '9+ months until expiration';
+  function pickColFromLabelText(txt) {
+    const t = (txt || '').toString();
+    for (const k of EXP_KEYS) if (k.test.test(t)) return k.col;
+    return 'price_9plus';
   }
   function setPriceKeepingStyle(el, value) {
     if (!el) return;
     const text = fmt(value);
-    // Replace only the text node so classes remain intact
-    let tn = Array.from(el.childNodes||[]).find(n => n.nodeType === 3);
+    let tn = Array.from(el.childNodes || []).find(n => n.nodeType === 3);
     if (!tn) { tn = document.createTextNode(''); el.appendChild(tn); }
     tn.textContent = text;
-
-    // Ensure green if it wasn't already greenish
     try {
       const cls = el.classList;
       const hasGreen = Array.from(cls).some(c => c === 'text-success' || c.startsWith('text-green'));
-      if (!hasGreen) cls.add('text-green-600','font-semibold');
+      if (!hasGreen) cls.add('text-green-600', 'font-semibold');
     } catch {}
   }
 
-  // Find all cards by walking up from the “Add to Sale” buttons
+  // Build a simple fuzzy index from the sheet
+  function buildIndex(rows) {
+    const index = [];
+    for (const r of rows) {
+      const name = r.name || r.Name || r.product || r.Product;
+      if (!name) continue;
+      const key = norm(name);
+      index.push({
+        key,
+        tokens: new Set(key.split(' ')),
+        row: {
+          price_9plus: toNum(r.price_9plus ?? r['9+'] ?? r['9_plus'] ?? r['9 mo']),
+          price_7to8:  toNum(r.price_7to8  ?? r['7-8'] ?? r['7_to_8'] ?? r['7-8 mo']),
+          price_6:     toNum(r.price_6     ?? r['6']   ?? r['6 mo']),
+        }
+      });
+    }
+    return index;
+  }
+
+  // Fuzzy match: token overlap with bonuses for matching numbers (25/50/100, etc.)
+  function resolveRow(index, visibleName) {
+    const alias = ALIAS[visibleName] || visibleName;
+    const key = norm(alias);
+    if (!key) return null;
+
+    // Fast exact key match first
+    let best = index.find(e => e.key === key);
+    if (best) return best.row;
+
+    const cardTokens = key.split(' ').filter(Boolean);
+    let top = null;
+    let topScore = -1;
+
+    for (const e of index) {
+      let score = 0;
+      for (const t of cardTokens) {
+        if (e.tokens.has(t)) {
+          score += 1;
+          if (/^\d+$/.test(t)) score += 0.75; // numeric token bonus
+          if (t.length >= 5) score += 0.25;   // longer word bonus
+        }
+      }
+      if (score > topScore) { topScore = score; top = e; }
+    }
+
+    // Require at least a minimal overlap (tuneable)
+    return topScore >= 2 ? top.row : null;
+  }
+
   function findAllCards() {
-    const btns = [...document.querySelectorAll('button')].filter(b => /add to sale/i.test(b.textContent||''));
+    const btns = [...document.querySelectorAll('button')].filter(b =>
+      /add to sale/i.test(b.textContent || '')
+    );
     const cards = [];
     for (const b of btns) {
       let root = b.closest('[data-product-card], .product-card, .bg-white, .card') || b.parentElement;
-      // climb a few levels until we see name/price/select together
-      for (let i=0; i<8 && root; i++) {
-        if (findNameEl(root) && (findPriceEl(root) || root.querySelector('[class*="text-green"]')) ) break;
+      for (let i = 0; i < 8 && root; i++) {
+        if (findNameEl(root) && (findPriceEl(root) || root.querySelector('[class*="text-green"]'))) break;
         root = root.parentElement;
       }
       if (root && !cards.includes(root)) cards.push(root);
@@ -91,38 +144,16 @@
     return cards;
   }
 
-  // Build lookup from CSV rows
-  function buildMap(rows) {
-    const map = new Map();
-    rows.forEach(r => {
-      const key = norm(r.name || r.Name || r.product || r.Product);
-      if (!key) return;
-      map.set(key, {
-        price_9plus: toNum(r.price_9plus ?? r['9+'] ?? r['9_plus'] ?? r['9 mo']),
-        price_7to8:  toNum(r.price_7to8  ?? r['7-8'] ?? r['7_to_8'] ?? r['7-8 mo']),
-        price_6:     toNum(r.price_6     ?? r['6']   ?? r['6 mo']),
-      });
-    });
-    return map;
-  }
-
-  function rowForCard(map, card) {
+  function applyToCard(index, card) {
     const nameEl = findNameEl(card);
-    if (!nameEl) return null;
-    const visible = (nameEl.textContent||'').trim();
-    const sheetKey = ALIAS[visible] || visible;
-    return map.get(norm(sheetKey)) || null;
-  }
-
-  function applyToCard(map, card) {
     const priceEl = findPriceEl(card);
-    if (!priceEl) return false;
+    if (!nameEl || !priceEl) return false;
 
     const sel = findSelect(card);
-    const label = currentLabel(sel);
-    const col = EXP_MAP[label] || 'price_9plus';
+    const labelTxt = sel?.options?.[sel.selectedIndex]?.textContent || '';
+    const col = pickColFromLabelText(labelTxt);
 
-    const row = rowForCard(map, card);
+    const row = resolveRow(index, (nameEl.textContent || '').trim());
     if (!row) { card.dataset.priceSyncMissing = '1'; return false; }
 
     const val = row[col] ?? row.price_9plus;
@@ -131,47 +162,45 @@
     setPriceKeepingStyle(priceEl, val);
 
     if (sel && !sel.dataset.boundPriceSync) {
-      sel.addEventListener('change', () => applyToCard(map, card));
+      sel.addEventListener('change', () => applyToCard(index, card));
       sel.dataset.boundPriceSync = '1';
     }
     return true;
   }
 
   function runWith(rows) {
-    const map = buildMap(rows);
+    const index = buildIndex(rows);
+
     const applyAll = () => {
       const cards = findAllCards();
       let changed = 0;
-      cards.forEach(c => { if (applyToCard(map, c)) changed++; });
+      for (const c of cards) if (applyToCard(index, c)) changed++;
       console.log('[price-sync] applied to', cards.length, 'cards; changed', changed, 'prices');
     };
-    // initial + react/route updates
+
     applyAll();
-    const mo = new MutationObserver(() => applyAll());
+    const mo = new MutationObserver(applyAll);
     mo.observe(document.body, { childList: true, subtree: true });
   }
 
-  // PapaParse loader (handles commas safely)
   function start() {
     function fetchSheet() {
       Papa.parse(CSV_URL + '&cb=' + Date.now(), {
-        download: true, header: true, skipEmptyLines: true,
+        download: true,
+        header: true,
+        skipEmptyLines: true,
         complete: res => runWith(res.data),
-        error: err => console.error('[price-sync] CSV load error', err)
+        error: err => console.error('[price-sync] CSV load error', err),
       });
     }
-    // wait for cards to exist, then fetch
-    let tries = 0;
-    const maxTries = 20;
-    const tick = () => {
-      if (findAllCards().length) { fetchSheet(); return; }
-      if (tries++ < maxTries) setTimeout(tick, 500);
-      else fetchSheet(); // fetch anyway; observer will catch later renders
-    };
-    tick();
+    let tries = 0, maxTries = 20;
+    (function waitForCards(){
+      if (findAllCards().length) return fetchSheet();
+      if (tries++ < maxTries) return setTimeout(waitForCards, 500);
+      fetchSheet();
+    })();
   }
 
-  // load Papa if needed, then start
   if (typeof Papa === 'undefined') {
     const s = document.createElement('script');
     s.src = 'https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js';
@@ -183,6 +212,7 @@
   }
 })();
 </script>
+
 
 
 
