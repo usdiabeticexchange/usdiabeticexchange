@@ -45,13 +45,19 @@
   }
 
   function findPriceEl(card) {
+    // Prefer existing green/price elements
     const candidates = card.querySelectorAll(
       '[data-price], .price, .product-price, .price-value, .text-success, .text-green-600, .text-green-700, [class*="text-green"]'
     );
     for (const el of candidates) {
       if (/\$\s*\d/.test((el.textContent || '').trim())) return el;
     }
-    return candidates[0] || null;
+    // Fallback: first element in the card that looks like a price
+    for (const el of card.querySelectorAll('*')) {
+      const t = (el.textContent || '').trim();
+      if (/^\$?\d+(\.\d{1,2})?$/.test(t)) return el;
+    }
+    return null;
   }
 
   function labelFor(sel) {
@@ -81,24 +87,19 @@
     } catch {}
   }
 
-  // Find cards via "Add to Sale" button → walk up to the card container
+  // ✅ Looser card discovery: find the button, then climb to a reasonable container.
   function findAllCards() {
     const btns = [...document.querySelectorAll('button')].filter(b =>
       /add to sale/i.test(b.textContent || '')
     );
-    const cards = [];
-    for (const btn of btns) {
-      let el = btn.closest('[data-product-card], .product-card, .bg-white, .card') || btn.parentElement;
-      for (let i = 0; i < 8 && el; i++) {
-        const nameEl = findNameEl(el);
-        const priceEl = findPriceEl(el);
-        const sel = el.querySelector('select');
-        if (nameEl && priceEl && sel) break;
-        el = el.parentElement;
-      }
-      if (el && !cards.includes(el)) cards.push(el);
-    }
-    return cards;
+    const cards = btns
+      .map(b => (
+        b.closest('[data-product-card], .product-card, .bg-white, .card, .rounded, .border') ||
+        b.parentElement
+      ))
+      .filter(Boolean);
+    // unique
+    return [...new Set(cards)];
   }
 
   function buildMap(rows) {
@@ -124,10 +125,8 @@
   }
 
   function applyPriceToCard(map, card) {
-    const priceEl = findPriceEl(card);
-    if (!priceEl) return;
-
     const sel = card.querySelector('select');
+    const priceEl = findPriceEl(card);
     const label = labelFor(sel);
     const col = EXP_MAP[label] || 'price_9plus';
 
@@ -147,14 +146,26 @@
 
   function hydrate(rows) {
     const map = buildMap(rows);
-    const applyAll = () => findAllCards().forEach(c => applyPriceToCard(map, c));
+    const applyAll = () => {
+      const cards = findAllCards();
+      cards.forEach(c => applyPriceToCard(map, c));
+      console.log('[price-sync] applied to', cards.length, 'cards');
+    };
+
+    // Try immediately + after SPA hydrates
     applyAll();
 
-    // React/Vue route swaps, lazy lists, etc.
+    // Run a few ticks while the SPA mounts
+    let tries = 30;
+    const tick = () => {
+      applyAll();
+      if (--tries > 0) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+
+    // Also watch for DOM mutations (tab switches, infinite lists, route changes)
     const mo = new MutationObserver(applyAll);
     mo.observe(document.body, { childList: true, subtree: true });
-
-    console.log('[price-sync] applied to', findAllCards().length, 'cards');
   }
 
   function start() {
@@ -178,7 +189,12 @@
     }
   }
 
-  start();
+  // Start after the app begins rendering
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start, { once: true });
+  } else {
+    start();
+  }
 })();
 </script>
 
