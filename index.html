@@ -10,7 +10,7 @@
 
 <body>
   <div id="root"></div>
-<!-- Price sync + Cart override (Google Sheets) -->
+<!-- Price sync + option-label update + cart override -->
 <script>
 (() => {
   if (window.__PRICE_SYNC_RUNNING__) return;
@@ -19,24 +19,23 @@
   const CSV_URL =
     'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
 
-  const DEBUG = false; // set to true if you want logs
+  const DEBUG = false; // flip to true to see logs
 
-  // Which column to use based on select label
+  // Which column to use for each expiration label text
   const EXP_KEYS = [
     { test: /9\+|\b9\s*months?/i, col: 'p9'  },
-    { test: /\b7\s*[-–]\s*8|\b7-8/i, col: 'p78' },
+    { test: /\b7\s*[-–]?\s*8|\b7-8/i, col: 'p78' },
     { test: /\b6\s*months?/i,     col: 'p6'  }
   ];
 
-  // Optional title fixes
+  // Optional title fixes if any card title differs from sheet
   const ALIAS = {
     // 'MMT-242': 'MMT 242',
   };
 
   // ---------- utils ----------
   const norm = s => (s||'')
-    .toLowerCase()
-    .replace(/™|®/g,'')
+    .toLowerCase().replace(/™|®/g,'')
     .replace(/[^a-z0-9]+/g,' ')
     .replace(/\s+/g,' ')
     .trim();
@@ -65,7 +64,6 @@
   }
   const findSelect = card => card.querySelector('select');
 
-  // Keep green style and avoid “$8.00” + “5.00” concatenation
   function setPriceKeepingStyle(el, value){
     if (!el) return;
     el.textContent = fmt(value);
@@ -141,7 +139,25 @@
     return row[col] ?? row.p9 ?? null;
   }
 
-  // ---------- apply to product cards with cache key ----------
+  // ---------- update select option labels ----------
+  function tidyLabelText(s){
+    // strip trailing " - $xx.xx" if present
+    return (s||'').replace(/\s*[-–]\s*\$\s*\d[\d.,]*\s*$/,'').trim();
+  }
+  function updateSelectLabels(card, row){
+    const sel = findSelect(card);
+    if (!sel || !row) return;
+    [...sel.options].forEach(opt => {
+      const base = tidyLabelText(opt.textContent || '');
+      const col  = pickColFromLabelText(base);
+      const val  = row[col] ?? row.p9;
+      if (val != null){
+        opt.textContent = `${base} - ${fmt(val)}`;
+      }
+    });
+  }
+
+  // ---------- apply to product card ----------
   function applyToCard(card){
     const nameEl  = findNameEl(card);
     const priceEl = findPriceEl(card);
@@ -151,16 +167,22 @@
     const labelText = sel?.options?.[sel.selectedIndex]?.textContent || '';
     const nameText  = (nameEl.textContent||'').trim();
 
-    const val = resolvePriceByNameAndLabel(nameText, labelText);
+    const row = resolveRow(nameText);
+    if (!row) return false;
+
+    // refresh the dropdown labels to the current sheet prices
+    updateSelectLabels(card, row);
+
+    const col = pickColFromLabelText(labelText);
+    const val = row[col] ?? row.p9;
     if (val == null) return false;
 
-    const key = labelText + '|' + val;
-    if (card.dataset.psAppliedKey === key) return false; // no change since last time
+    const key = (tidyLabelText(labelText) + '|' + val);
+    if (card.dataset.psAppliedKey === key) return false;
 
     setPriceKeepingStyle(priceEl, val);
     card.dataset.psAppliedKey = key;
 
-    // bind once so switching expiration updates price
     if (sel && !sel.dataset.boundPriceSync){
       sel.addEventListener('change', () => applyToCard(card));
       sel.dataset.boundPriceSync = '1';
@@ -170,7 +192,6 @@
 
   // ---------- cart override ----------
   function findCartRoot(){
-    // Try common dialog containers
     const dialogs = [...document.querySelectorAll('[role="dialog"], [aria-modal="true"], .fixed, .drawer, .modal')];
     for (const d of dialogs){
       const txt = (d.textContent||'').toLowerCase();
@@ -178,104 +199,75 @@
     }
     return null;
   }
-
+  const replaceMoneyIn = (el, val) => {
+    const t = (el.textContent||'');
+    el.textContent = /\$\s*\d/.test(t) ? t.replace(/\$\s*\d[\d.,]*/g, fmt(val)) : fmt(val);
+  };
   function getQtyFromRow(row){
-    // Try input number
     const inp = row.querySelector('input[type="number"]');
     if (inp){
       const n = parseInt(inp.value || inp.getAttribute('value') || '1', 10);
       return Number.isFinite(n) ? n : 1;
     }
-    // Try text between minus/plus
-    const btnMinus = row.querySelector('button');
-    if (btnMinus && btnMinus.nextElementSibling){
-      const t = btnMinus.nextElementSibling.textContent || '';
-      const n = parseInt(t.replace(/[^\d]/g,''), 10);
-      if (Number.isFinite(n)) return n;
-    }
-    // Fallback 1
-    return 1;
+    const between = row.querySelector('button')?.nextElementSibling?.textContent || '';
+    const n = parseInt(between.replace(/[^\d]/g,''), 10);
+    return Number.isFinite(n) ? n : 1;
   }
 
   function syncCartPrices(){
     const root = findCartRoot();
     if (!root) return false;
 
-    // Find candidate rows: things that have a plus or minus button OR look like an item line
+    // item rows: look for rows with “each” price or quantity controls
     const rows = [...root.querySelectorAll('div,li,section,article')].filter(el =>
-      /\+\s*$/.test(el.textContent||'') || /–|-/.test(el.textContent||'')
+      /\$\s*\d/.test(el.textContent||'') && (/each/i.test(el.textContent||'') || /[-+]\s*$/.test(el.textContent||''))
     );
 
-    let any = false;
-    let total = 0;
+    let any=false, total=0;
 
-    // Build a quick map of visible names (from cards) to price function
-    const cardNames = new Set(findAllCards().map(c => (findNameEl(c)?.textContent||'').trim()));
-
-    // Walk rows, try to detect a product name and replace prices
     rows.forEach(row => {
-      // name: first element with some bold/heading, else longest line
-      let nameEl = row.querySelector('h3,h4,strong,.font-semibold,.card-title,[data-product-name]');
-      let name = (nameEl?.textContent || '').trim();
+      // name
+      let nameEl = row.querySelector('h3,h4,strong,.font-semibold,[data-product-name]');
+      let name   = (nameEl?.textContent || '').trim();
       if (!name){
         const parts = (row.textContent||'').split('\n').map(s=>s.trim()).filter(Boolean);
         name = parts.sort((a,b)=>b.length-a.length)[0] || '';
       }
       if (!name) return;
 
-      // Only try for names we likely have on page or in sheet
-      const rowData = resolveRow(name);
-      if (!rowData && !cardNames.has(name)) return;
-
-      // label (expiration) — grab a select near the row, else assume 9+
+      // expiration label near row (if present)
       const sel = row.querySelector('select');
       const labelText = sel?.options?.[sel.selectedIndex]?.textContent || '9+ months until expiration';
-      const price = resolvePriceByNameAndLabel(name, labelText);
-      if (price == null) return;
+      const val = resolvePriceByNameAndLabel(name, labelText);
+      if (val == null) return;
 
-      // Replace any $x.xx text nodes in the row
+      // replace every money-looking child in this row
       const moneyEls = [...row.querySelectorAll('*')].filter(e => /\$\s*\d/.test((e.textContent||'')));
-      if (moneyEls.length){
-        moneyEls.forEach(e => {
-          // If element contains something like "$35 each", keep the suffix
-          const m = (e.textContent||'').match(/(\$)\s*\d[\d.,]*/);
-          if (m){
-            e.textContent = (e.textContent||'').replace(/\$\s*\d[\d.,]*/, fmt(price));
-          }
-        });
-      }
-      // Update “each” blurb if present
-      const eachEl = [...row.querySelectorAll('*')].find(e => /each/i.test(e.textContent||''));
-      if (eachEl){
-        eachEl.textContent = (eachEl.textContent||'').replace(/\$\s*\d[\d.,]*/, fmt(price));
-      }
+      moneyEls.forEach(e => replaceMoneyIn(e, val));
 
       const qty = getQtyFromRow(row);
-      total += (price * qty);
+      total += (val * qty);
       any = true;
     });
 
-    // Totals in drawer (both “Total value:” up top and the big green total)
+    // totals
     if (any){
-      const currencyEls = [...root.querySelectorAll('*')].filter(e => /\$\s*\d/.test((e.textContent||'')));
-      // Update any element that looks like a total near words "total"
-      currencyEls.forEach(el => {
-        const t = (el.textContent||'');
-        if (/total/i.test(el.parentElement?.textContent||'') || /total value/i.test(root.textContent||'')){
-          el.textContent = t.replace(/\$\s*\d[\d.,]*/, fmt(total));
-        }
-      });
+      // big green total and “Total value”
+      const totalEls = [...root.querySelectorAll('*')].filter(e =>
+        /\$\s*\d/.test(e.textContent||'') &&
+        /total/i.test(e.parentElement?.textContent||'') || /total value/i.test(root.textContent||'')
+      );
+      totalEls.forEach(el => replaceMoneyIn(el, total));
     }
     return any;
   }
 
-  // Run cart sync on drawer changes
+  // Observe cart for re-renders
   let cartObs;
   function attachCartObserver(){
-    const root = document.body;
     if (cartObs) cartObs.disconnect();
     cartObs = new MutationObserver(() => { syncCartPrices(); });
-    cartObs.observe(root, { childList:true, subtree:true });
+    cartObs.observe(document.body, { childList:true, subtree:true });
   }
 
   // ---------- orchestration ----------
@@ -288,23 +280,20 @@
       const cards = findAllCards();
       let changed = 0;
       for (const c of cards) if (applyToCard(c)) changed++;
-      if (DEBUG) console.log('[price-sync] applied to', cards.length, 'cards; changed', changed, 'prices');
-      // also try cart on each pass (cheap)
+      if (DEBUG) console.log('[price-sync] applied to', cards.length, 'cards; changed', changed);
       syncCartPrices();
     }, 150);
   }
 
   function observeProducts(){
-    // Scope the observer to the smallest container that contains the grid
-    const aCard = findAllCards()[0];
-    productRoot = aCard ? (aCard.closest('main, [class*="container"], #root') || document.body) : document.body;
-
+    const first = findAllCards()[0];
+    productRoot = first ? (first.closest('main, [class*="container"], #root') || document.body) : document.body;
     const mo = new MutationObserver(queueApplyAll);
-    mo.observe(productRoot, { childList:true, subtree:true }); // not watching characterData
+    mo.observe(productRoot, { childList:true, subtree:true });
   }
 
   function start(){
-    // Wait a bit for SPA to mount
+    // run after cards mount
     let tries=0, max=40;
     (function wait(){
       if (findAllCards().length){
@@ -314,8 +303,8 @@
             PRICE_INDEX = buildIndex(res.data);
             observeProducts();
             attachCartObserver();
-            // initial passes
             queueApplyAll();
+            // extra passes to catch late mounts
             let n=0; const maxN=5;
             (function late(){ queueApplyAll(); if(++n<maxN) setTimeout(late, 600); })();
           },
@@ -324,7 +313,7 @@
       } else if (++tries < max){
         setTimeout(wait, 300);
       } else {
-        // Give up waiting, still try
+        // try anyway
         Papa.parse(CSV_URL + '&cb=' + Date.now(), {
           download:true, header:true, skipEmptyLines:true,
           complete: res => { PRICE_INDEX = buildIndex(res.data); observeProducts(); attachCartObserver(); queueApplyAll(); },
@@ -332,9 +321,17 @@
         });
       }
     })();
+
+    // when user clicks Add to Sale, re-sync cart shortly after
+    document.addEventListener('click', e => {
+      if (/add to sale/i.test(e.target?.textContent||'')){
+        setTimeout(syncCartPrices, 250);
+        setTimeout(syncCartPrices, 800);
+      }
+    }, true);
   }
 
-  // Load Papa
+  // Load PapaParse then start
   if (typeof Papa === 'undefined'){
     const s=document.createElement('script');
     s.src='https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js';
@@ -348,6 +345,7 @@
   if (DEBUG) console.log('[price-sync] inline script loaded');
 })();
 </script>
+
 
 
 
