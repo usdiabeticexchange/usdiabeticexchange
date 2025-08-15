@@ -10,6 +10,116 @@
 
 <body>
   <div id="root"></div>
+  <!-- Price sync from Google Sheets (runs on any route that has product cards) -->
+<script>
+(() => {
+  // Your published CSV (keep this)
+  const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
+
+  // Map the dropdown labels on your site -> sheet columns
+  const EXP_MAP = {
+    '9+ months until expiration': 'price_9plus',
+    '9 months until expiration':  'price_9plus',
+    '7-8 months until expiration':'price_7to8',
+    '7–8 months until expiration':'price_7to8',
+    '6 months until expiration':  'price_6',
+  };
+
+  // Optional: fix name mismatches without editing HTML
+  // Left = what the card shows, Right = exact sheet name
+  const ALIAS = {
+    // 'OneTouch Ultra 50 Ct.': 'OneTouch Ultra 50 Ct.',
+    // 'MMT-242': 'MMT-242',  // add as needed
+  };
+
+  const norm = s => (s||'').toLowerCase().replace(/\s+/g,' ').trim();
+  const toNum = v => { const n = Number(String(v ?? '').replace(/[^0-9.]/g,'')); return Number.isFinite(n)?n:0; };
+  const fmt  = n => '$' + Number(n).toFixed(2);
+
+  function findNameEl(card){
+    return card.querySelector('[data-product-name], .product-name, .card-title, h3, h4, .title');
+  }
+  function findPriceEl(card){
+    return card.querySelector('[data-price], .price, .product-price, .price-value, .text-success, .text-green');
+  }
+  function findSelectEl(card){
+    return card.querySelector('select');
+  }
+
+  function getCardSheetKey(nameEl){
+    const visible = nameEl.textContent.trim();
+    const alias = nameEl.dataset?.alias || ALIAS[visible] || visible;
+    return norm(alias);
+  }
+
+  function applyPrice(card, map){
+    const nameEl = findNameEl(card);
+    const priceEl = findPriceEl(card);
+    if(!nameEl || !priceEl) return;
+
+    const key = getCardSheetKey(nameEl);
+    const row = map.get(key);
+    if(!row){ card.dataset.priceSyncMissing = '1'; return; }
+
+    const sel = findSelectEl(card);
+    const label = sel ? sel.options[sel.selectedIndex].text.trim() : '9+ months until expiration';
+    const col   = EXP_MAP[label] || 'price_9plus';
+    const val   = row[col] ?? row.price_9plus;
+    if(val == null) return;
+
+    priceEl.textContent = fmt(val);
+
+    if(sel && !sel.dataset.bound){
+      sel.addEventListener('change', () => applyPrice(card, map));
+      sel.dataset.bound = '1';
+    }
+  }
+
+  function hydrate(data){
+    const map = new Map();
+    data.forEach(r => {
+      const name = norm(r.name || r.Name || r.product || r.Product);
+      if(!name) return;
+      map.set(name, {
+        price_9plus: toNum(r.price_9plus ?? r['9+'] ?? r['9_plus'] ?? r['9mo']),
+        price_7to8:  toNum(r.price_7to8  ?? r['7-8'] ?? r['7_8']  ?? r['7–8']),
+        price_6:     toNum(r.price_6     ?? r['6']   ?? r['6mo']),
+      });
+    });
+
+    const applyAll = () => {
+      document.querySelectorAll('[data-product-card], .product-card, .card')
+        .forEach(card => applyPrice(card, map));
+    };
+
+    applyAll();
+
+    // Re-run when SPA swaps content (tabs, infinite lists, etc.)
+    const mo = new MutationObserver(applyAll);
+    mo.observe(document.body, { childList:true, subtree:true });
+
+    const missing = document.querySelectorAll('[data-price-sync-missing]').length;
+    if(missing) console.warn(`[price-sync] No sheet match for ${missing} card(s). Add ALIAS entries or data-alias attributes.`);
+  }
+
+  function start(){
+    Papa.parse(CSV_URL + '&cb=' + Date.now(), {
+      download:true, header:true, skipEmptyLines:true,
+      complete: res => hydrate(res.data),
+      error: err => console.error('[price-sync] CSV load error', err)
+    });
+  }
+
+  // Load PapaParse if needed
+  if(typeof Papa === 'undefined'){
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js';
+    s.onload = start; s.onerror = () => console.error('[price-sync] Failed to load PapaParse');
+    document.head.appendChild(s);
+  } else start();
+})();
+</script>
+
 </body>
 
 </html>
