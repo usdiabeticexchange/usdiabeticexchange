@@ -92,10 +92,13 @@
     return cards;
   }
 
+  // 🔧 FIX: read product_name (and a few other common variants)
   function buildMap(rows) {
     const map = new Map();
     rows.forEach(r => {
-      const key = norm(r.name || r.Name || r.product || r.Product);
+      const raw =
+        r.product_name ?? r['Product Name'] ?? r.name ?? r.Name ?? r.product ?? r.Product ?? r.title ?? r.Title;
+      const key = norm(raw);
       if (!key) return;
       map.set(key, {
         price_9plus: toNum(r.price_9plus ?? r['price_9+'] ?? r['9+'] ?? r['9_plus'] ?? r['9 mo']),
@@ -103,6 +106,7 @@
         price_6:     toNum(r.price_6     ?? r['6']   ?? r['6 mo']   ?? r['6_months']),
       });
     });
+    if (DEBUG) console.log('[price-sync] sheet rows parsed:', rows.length, 'map size:', map.size);
     return map;
   }
 
