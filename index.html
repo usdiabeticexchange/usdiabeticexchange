@@ -10,26 +10,25 @@
 
 <body>
   <div id="root"></div>
-<!-- Price Sync LITE: updates card price from Google Sheets (safe/throttled) -->
+<!-- Price Sync LITE (with logs): updates the green on-card price from Google Sheets -->
 <script>
 (() => {
-  // Run only on product pages
-  if (!/sell-your-/i.test(location.pathname)) return;
-
   // Prevent double-run
   if (window.__PS_LITE__) return; window.__PS_LITE__ = true;
+  console.log('[ps-lite] inline script loaded');
 
+  // Your published CSV
   const CSV_URL =
     'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
 
   // Map dropdown text -> sheet columns
   const EXP_KEYS = [
     { test: /9\+|\b9\s*months?/i, col: 'p9'  },
-    { test: /\b7\s*[-–]?\s*8|\b7-8/i, col: 'p78' },
-    { test: /\b6\s*months?/i,     col: 'p6'  }
+    { test: /\b7\s*[-–]?\s*8|\b7-8/i,        col: 'p78' },
+    { test: /\b6\s*months?/i,               col: 'p6'  }
   ];
 
-  // If any visible title differs a lot from sheet names, add here:
+  // Optional name fallbacks if a visible card title differs from sheet name
   const ALIAS = {
     // 'MMT-242': 'MMT 242',
   };
@@ -45,7 +44,9 @@
     const n = Number(String(v ?? '').replace(/[^\d.]/g,''));
     return Number.isFinite(n) ? n : null;
   };
+
   const fmt = n => '$' + Number(n).toFixed(2);
+
   const pickCol = label => {
     const t = (label||'').toString();
     for (const k of EXP_KEYS) if (k.test.test(t)) return k.col;
@@ -102,16 +103,18 @@
         row: {
           p9:  toNum(r['9+ months until expiration'] ?? r['9 months until expiration'] ?? r.price_9plus ?? r['9+'] ?? r['9_plus'] ?? r['9 mo']),
           p78: toNum(r['7-8 months until expiration'] ?? r.price_7to8 ?? r['7-8'] ?? r['7_to_8'] ?? r['7-8 mo']),
-          p6:  toNum(r['6 months until expiration']   ?? r.price_6   ?? r['6']   ?? r['6 mo']      ?? r['6_months']),
+          p6:  toNum(r['6 months until expiration']   ?? r.price_6     ?? r['6']   ?? r['6 mo']     ?? r['6_months']),
         }
       });
     }
     return idx;
   }
+
   function resolveRow(visibleName){
     const alias = ALIAS[visibleName] || visibleName;
     const key = norm(alias);
     if (!key) return null;
+
     const exact = PRICE_INDEX.find(e => e.key === key);
     if (exact) return exact.row;
 
@@ -146,53 +149,56 @@
     const val = row[col] ?? row.p9;
     if (val == null) return false;
 
-    const key = (row.key || '') + '|' + col + '|' + val;
+    // prevent redundant writes
+    const key = (row.key || nameEl.textContent || '') + '|' + col + '|' + val;
     if (card.dataset.psLiteKey === key) return false;
 
     setPriceKeepingStyle(priceEl, val);
     card.dataset.psLiteKey = key;
-
-    if (sel && !sel.dataset.boundLite){
-      sel.addEventListener('change', () => applyToCard(card));
-      sel.dataset.boundLite = '1';
-    }
     return true;
   }
 
   // Throttled apply
   let pending = false;
-  function applyAllThrottled(){
+  function applyAllThrottled(tag=''){
     if (pending) return;
     pending = true;
     setTimeout(() => {
       pending = false;
       const cards = findAllCards();
-      for (const c of cards) applyToCard(c);
-    }, 150);
+      let changed = 0;
+      for (const c of cards) if (applyToCard(c)) changed++;
+      console.log(`[ps-lite] applied to ${cards.length} cards; changed ${changed} prices` + (tag?` (${tag})`:''));      
+    }, 120);
   }
 
   function startSync(){
     // Wait for cards, then fetch CSV
     let tries=0, max=40;
     (function waitForCards(){
-      if (findAllCards().length){
+      const count = findAllCards().length;
+      if (count){
+        console.log('[ps-lite] cards detected:', count, '— starting CSV load');
         Papa.parse(CSV_URL + '&cb=' + Date.now(), {
           download:true, header:true, skipEmptyLines:true,
           complete: res => {
             PRICE_INDEX = buildIndex(res.data);
-            applyAllThrottled();
-            // Light observer on the root only, throttled, and we stop after a few passes
+            console.log('[ps-lite] sheet rows parsed:', res.data.length);
+            applyAllThrottled('initial');
+            // Observe a bit for SPA updates
             const root = document.querySelector('#root') || document.body;
             let passes=0; const mo = new MutationObserver(() => {
-              applyAllThrottled();
-              if (++passes > 15) mo.disconnect();
+              applyAllThrottled('mutation');
+              if (++passes > 15) { mo.disconnect(); console.log('[ps-lite] observer disconnected'); }
             });
             mo.observe(root, { childList:true, subtree:true });
           },
-          error: err => console.error('[price-sync lite] CSV load error', err),
+          error: err => console.error('[ps-lite] CSV load error', err),
         });
       } else if (++tries < max){
-        setTimeout(waitForCards, 300);
+        setTimeout(waitForCards, 250);
+      } else {
+        console.warn('[ps-lite] no cards detected — giving up');
       }
     })();
   }
@@ -202,7 +208,7 @@
     const s=document.createElement('script');
     s.src='https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js';
     s.onload=startSync;
-    s.onerror=()=>console.error('[price-sync lite] Failed to load PapaParse');
+    s.onerror=()=>console.error('[ps-lite] Failed to load PapaParse');
     document.head.appendChild(s);
   } else {
     startSync();
