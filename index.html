@@ -219,8 +219,8 @@
 <script>
 (() => {
   // prevent duplicates
-  if (window.__PS_ADDON_V4__) return; window.__PS_ADDON_V4__ = true;
-  console.log('[ps-addon v4] init');
+  if (window.__PS_ADDON_V5__) return; window.__PS_ADDON_V5__ = true;
+  console.log('[ps-addon v5] init');
 
   const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
 
@@ -235,7 +235,7 @@
     : /\b7\s*[-–]?\s*8|\b7-8/i.test(label) ? 'p78'
     : 'p9';
 
-  // manual fixes if any title doesn't match your sheet name exactly
+  // optional manual map if any title needs help
   const ALIAS = {
     // 'OneTouch Ultra 50 Ct.': 'OneTouch Ultra 50 Ct.',
   };
@@ -266,6 +266,7 @@
     for (const el of cands) if (/\$\s*\d/.test((el.textContent||'').trim())) return el;
     return cands[0] || null;
   };
+  const getSelect  = c => c.querySelector('select');
 
   const cartRoot = () =>
     document.querySelector('[role="dialog"], [aria-modal="true"], [class*="drawer"], [data-cart], .cart');
@@ -299,7 +300,7 @@
         p6:  toNum(r['6 months until expiration']   ?? r.price_6   ?? r['6']   ?? r['6 mo']),
       });
     }
-    console.log('[ps-addon v4] sheet rows indexed:', map.size);
+    console.log('[ps-addon v5] sheet rows indexed:', map.size);
     return map;
   }
 
@@ -311,18 +312,16 @@
 
     // fuzzy fallback
     const tokens = key.split(' ').filter(Boolean);
-    let best=null, score=-1;
+    let bestKey=null, best=null, score=-1;
     for (const [k,v] of INDEX){
-      let s=0;
-      for (const t of tokens){
-        if (k.includes(t)){ s+=1; if (/^\d+$/.test(t)) s+=0.75; if (t.length>=5) s+=0.25; }
-      }
-      if (s>score){ score=s; best=v; }
+      let s=0; for (const t of tokens){ if (k.includes(t)){ s+=1; if (/^\d+$/.test(t)) s+=0.75; if (t.length>=5) s+=0.25; } }
+      if (s>score){ score=s; best=v; bestKey=k; }
     }
-    return score>=2 ? best : null;
+    if (score>=2) return best;
+    return null;
   }
 
-  // ---------- card & cart updates ----------
+  // ---------- write helpers ----------
   function setGreenPrice(el, num){
     if (!el) return;
     el.textContent = fmt(num);
@@ -333,8 +332,9 @@
     } catch {}
   }
 
+  // Update dropdown labels AND stash numeric in value/dataset
   function rewriteOptions(card, row){
-    const sel = card.querySelector('select'); if (!sel) return 0;
+    const sel = getSelect(card); if (!sel) return 0;
     let changed = 0;
     for (const opt of sel.options){
       const base = baseLabel(opt.textContent);
@@ -343,18 +343,45 @@
       if (val != null){
         const next = `${base} - ${fmt(val)}`;
         if (opt.textContent !== next){ opt.textContent = next; changed++; }
+        // make numbers available to any code that reads value/dataset
+        opt.dataset.psPrice = String(val);
+        // if the current value looks like a number or blank, replace it with the new number
+        if (opt.value === '' || /^[\d.]+$/.test(opt.value)) opt.value = String(val);
       }
     }
     return changed;
   }
 
+  // push numeric price into likely places your cart code reads
+  function stampNumericPrice(card, num){
+    if (num == null) return;
+    // 1) card marker for debugging / other scripts
+    card.dataset.psPrice = String(num);
+
+    // 2) common hidden inputs (value used by add-to-cart)
+    card.querySelectorAll('input[type="hidden"][name*="price" i], input[type="hidden"][id*="price" i]')
+      .forEach(inp => { inp.value = String(num); inp.setAttribute('value', String(num)); });
+
+    // 3) any element carrying a data-price-ish attribute
+    card.querySelectorAll('[data-price],[data-price-value],[data-amount],[data-value]')
+      .forEach(el => {
+        if (el.hasAttribute('data-price'))        el.setAttribute('data-price',        String(num));
+        if (el.hasAttribute('data-price-value'))  el.setAttribute('data-price-value',  String(num));
+        if (el.hasAttribute('data-amount'))       el.setAttribute('data-amount',       String(num));
+        if (el.hasAttribute('data-value'))        el.setAttribute('data-value',        String(num));
+      });
+  }
+
   function syncCardPrice(card, row){
-    const sel = card.querySelector('select');
+    const sel = getSelect(card);
     const gre = getPriceEl(card);
     if (!sel || !gre) return;
     const currentBase = baseLabel(sel.options[sel.selectedIndex]?.textContent || '9+ months until expiration');
     const val = (row[labelToCol(currentBase)] ?? row.p9);
-    if (val != null) setGreenPrice(gre, val);
+    if (val != null){
+      setGreenPrice(gre, val);
+      stampNumericPrice(card, val);
+    }
   }
 
   function priceFromRow(row, label){
@@ -379,24 +406,22 @@
         node.textContent = fmt(want);
         changed++;
       }
+      // also stamp any hidden price fields inside cart item if present
+      item.querySelectorAll('input[type="hidden"][name*="price" i], input[type="hidden"][id*="price" i]')
+        .forEach(inp => { inp.value = String(want); inp.setAttribute('value', String(want)); });
     }
-    if (changed) console.log('[ps-addon v4] cart updated items:', changed);
+    if (changed) console.log('[ps-addon v5] cart updated items:', changed);
   }
 
   function applyEverywhere(){
-    if (!INDEX) { /* wait for sheet */ return; }
+    if (!INDEX) return;
 
     const cards = findCards();
-    console.log('[ps-addon v4] cards found:', cards.length);
-
     let optChanges = 0, changedPrices = 0, missing = [];
-    let samples = [];
 
     for (const c of cards){
       const name = (getNameEl(c)?.textContent || '').trim();
-      if (samples.length < 3) samples.push(name);
-
-      const row = resolveRow(name);
+      const row  = resolveRow(name);
       if (!row) { missing.push(name); continue; }
 
       optChanges += rewriteOptions(c, row);
@@ -406,7 +431,8 @@
       const after  = (getPriceEl(c)?.textContent || '').trim();
       if (before !== after) changedPrices++;
 
-      const sel = c.querySelector('select');
+      // bind change once
+      const sel = getSelect(c);
       if (sel && !sel.dataset.psBound){
         sel.addEventListener('change', () => {
           const r = resolveRow((getNameEl(c)?.textContent || '').trim());
@@ -416,15 +442,14 @@
       }
     }
 
-    console.log('[ps-addon v4] sample names:', samples);
-    if (missing.length) console.warn('[ps-addon v4] titles not matched (add ALIAS if needed):', missing);
-    if (optChanges)     console.log('[ps-addon v4] rewrote option labels on', optChanges, 'options');
-    if (changedPrices)  console.log('[ps-addon v4] updated green price on', changedPrices, 'cards');
+    if (missing.length) console.warn('[ps-addon v5] titles not matched (add ALIAS if needed):', missing);
+    if (optChanges)     console.log('[ps-addon v5] rewrote option labels/values on', optChanges, 'options');
+    if (changedPrices)  console.log('[ps-addon v5] updated green price on', changedPrices, 'cards');
 
     syncCart();
   }
 
-  // ---------- CSV load (Papa or fetch) ----------
+  // ---------- CSV load ----------
   function tinyParseCSV(txt){
     const lines = txt.split(/\r?\n/).filter(Boolean);
     const hdr = (lines.shift() || '').split(',').map(h=>h.trim());
@@ -442,36 +467,47 @@
       Papa.parse(CSV_URL + '&cb=' + Date.now(), {
         download:true, header:true, skipEmptyLines:true,
         complete: res => run(res.data),
-        error: e => console.error('[ps-addon v4] CSV load error', e),
+        error: e => console.error('[ps-addon v5] CSV load error', e),
       });
     } else {
       fetch(CSV_URL + '&cb=' + Date.now())
         .then(r => r.ok ? r.text() : Promise.reject(r.status))
         .then(t => run(tinyParseCSV(t)))
-        .catch(e => console.error('[ps-addon v4] CSV fetch error', e));
+        .catch(e => console.error('[ps-addon v5] CSV fetch error', e));
     }
   }
 
-  // kick a moment after ps-lite logs its first pass
+  // start a moment after ps-lite
   setTimeout(start, 400);
 
-  // re-run when DOM changes, but it’s safe if INDEX isn’t ready yet
+  // re-run on DOM changes
   const mo = new MutationObserver(() => { clearTimeout(mo.t); mo.t = setTimeout(applyEverywhere, 120); });
   mo.observe(document.body, { childList:true, subtree:true });
 
-  // keep cart in sync after adds
+  // keep cart in sync and force numeric stamp right before your handler runs
   document.addEventListener('click', e => {
-    const b = e.target.closest('button');
-    if (b && /add to sale/i.test(b.textContent||'')){
-      setTimeout(syncCart, 250);
-      setTimeout(syncCart, 700);
+    const btn = e.target.closest('button');
+    if (!btn || !/add to sale/i.test(btn.textContent||'')) return;
+    const card = btn.closest('[data-product-card], .product-card, .bg-white, .card');
+    if (card){
+      const name = (getNameEl(card)?.textContent || '').trim();
+      const row  = resolveRow(name);
+      const sel  = getSelect(card);
+      const base = baseLabel(sel?.options?.[sel.selectedIndex]?.textContent || '9+ months until expiration');
+      const val  = row ? (row[labelToCol(base)] ?? row.p9) : null;
+      if (val != null){
+        stampNumericPrice(card, val); // push into hidden inputs / data attrs
+      }
     }
+    setTimeout(syncCart, 250);
+    setTimeout(syncCart, 700);
   });
 
-  // manual trigger if you want to test in console
+  // manual helpers for debugging
   window.__PS_SYNC__ = () => applyEverywhere();
 })();
 </script>
+
 
 
 
