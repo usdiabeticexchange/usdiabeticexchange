@@ -68,6 +68,17 @@
   function setPriceKeepingStyle(el, value){
     if (!el) return;
     el.textContent = fmt(value);
+    el.dataset.price = value;
+    const card = el.closest('[data-product-card], .product-card, .bg-white, .card');
+    if (card){
+      if (card.dataset) card.dataset.price = value;
+      const targets = card.querySelectorAll('input[type="hidden"], [data-price]');
+      targets.forEach(t => {
+        if (t === el) return;
+        if (t.tagName === 'INPUT') t.value = value;
+        if (t.dataset) t.dataset.price = value;
+      });
+    }
     try {
       const cls = el.classList;
       const hasGreen = Array.from(cls).some(c => c === 'text-success' || c.startsWith('text-green'));
