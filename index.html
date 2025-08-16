@@ -140,13 +140,15 @@
     if (!nameEl || !priceEl) return false;
 
     const sel = findSelect(card);
-    const label = sel?.options?.[sel.selectedIndex]?.textContent || '9+ months until expiration';
+    const opt = sel?.options?.[sel.selectedIndex];
+    const label = opt?.textContent || '9+ months until expiration';
 
     const row = resolveRow((nameEl.textContent||'').trim());
     if (!row) return false;
 
     const col = pickCol(label);
-    const val = row[col] ?? row.p9;
+    let val = Number(opt?.value);
+    if (!Number.isFinite(val)) val = row[col] ?? row.p9;
     if (val == null) return false;
 
     // prevent redundant writes
@@ -312,7 +314,11 @@
       const base = stripTrailingPrice(opt.textContent);
       const col  = pickCol(base);
       const val  = row[col] ?? row.p9;
-      if (val != null) opt.textContent = `${base} - ${fmt(val)}`;
+      if (val != null) {
+        opt.textContent   = `${base} - ${fmt(val)}`;
+        opt.value         = val;
+        opt.dataset.price = val;
+      }
     }
   }
 
