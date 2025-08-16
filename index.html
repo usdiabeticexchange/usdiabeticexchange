@@ -218,8 +218,8 @@
 
 <script>
 (() => {
-  if (window.__PS_SYNC_V6__) return; window.__PS_SYNC_V6__ = true;
-  console.log('[ps-sync] init');
+  if (window.__PS_SYNC_V7__) return; window.__PS_SYNC_V7__ = true;
+  console.log('[ps-sync v7] init');
 
   const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
 
@@ -227,12 +227,18 @@
   const fmt   = n => '$' + Number(n).toFixed(2);
   const toNum = v => { const n = Number(String(v ?? '').replace(/[^\d.]/g,'')); return Number.isFinite(n)?n:null; };
   const norm  = s => (s||'').toLowerCase().replace(/™|®/g,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
-  const baseLabel = t => String(t||'').replace(/\s*[-–]\s*\$[\d.,]+$/,'').trim();
+  const baseLabel = t => String(t||'').replace(/\s*[-–]?\s*\$[\d.,]+$/,'').trim();
 
   const labelToCol = (label) =>
     /\b6\s*months?/i.test(label) ? 'p6'
     : /\b7\s*[-–]?\s*8|\b7-8/i.test(label) ? 'p78'
-    : 'p9'; // default
+    : 'p9';
+
+  // If any visible title on the site differs from the sheet, map it here:
+  const ALIAS = {
+    // 'Freestyle Lite 100 Ct.' : 'Freestyle Lite 100 Ct', // example (punctuation/casing differences)
+    // 'FreeStyle Lite 50 Ct.'  : 'Freestyle Lite 50 Ct',
+  };
 
   // ---------- sheet index ----------
   let INDEX = null; // Map<normalizedName, {p9,p78,p6}>
@@ -246,10 +252,10 @@
       map.set(key, {
         p9 : toNum(r['9+ months until expiration'] ?? r['9 months until expiration'] ?? r.price_9plus ?? r['9+'] ?? r['9_plus'] ?? r['9 mo']),
         p78: toNum(r['7-8 months until expiration'] ?? r.price_7to8 ?? r['7-8'] ?? r['7_to_8'] ?? r['7-8 mo']),
-        p6 : toNum(r['6 months until expiration']   ?? r.price_6   ?? r['6']   ?? r['6 mo']),
+        p6 : toNum(r['6 months until expiration']   ?? r.price_6     ?? r['6']   ?? r['6 mo']),
       });
     }
-    console.log('[ps-sync] sheet rows indexed:', map.size);
+    console.log('[ps-sync v7] sheet rows indexed:', map.size);
     return map;
   }
 
@@ -281,11 +287,12 @@
 
   function resolveRowByCard(card){
     if (!INDEX) return null;
-    const title = (getNameEl(card)?.textContent || '').trim();
-    const key = norm(title);
+    const raw  = (getNameEl(card)?.textContent || '').trim();
+    const alias = ALIAS[raw] || raw;
+    const key = norm(alias);
     if (INDEX.has(key)) return INDEX.get(key);
 
-    // fuzzy fallback
+    // fuzzy fallback (token-score with bonus for numbers/long tokens)
     let best=null, score=-1;
     for (const [k,v] of INDEX){
       let s=0;
@@ -296,6 +303,34 @@
   }
 
   // ---------- card updates ----------
+  function setGreenPrice(el, num){
+    if (!el) return;
+    el.textContent = fmt(num);
+    try{
+      const cls = el.classList;
+      const hasGreen = Array.from(cls).some(c => c === 'text-success' || c.startsWith('text-green'));
+      if (!hasGreen) cls.add('text-green-600','font-semibold');
+    }catch{}
+  }
+
+  // Put the sheet price everywhere the app might read it
+  function stampPriceTargets(card, price){
+    // 1) Add to Sale button data
+    const btn = card.querySelector('button');
+    if (btn){
+      btn.dataset.price = String(price);
+      btn.setAttribute('data-price', String(price));
+      btn.setAttribute('data-amount', String(price));
+    }
+    // 2) Any obvious price holders on the card
+    card.querySelectorAll('[data-price],[data-amount],[data-value]').forEach(n=>{
+      n.dataset.price = String(price);
+      n.setAttribute('data-price', String(price));
+      n.setAttribute('data-amount', String(price));
+      n.setAttribute('data-value', String(price));
+    });
+  }
+
   function rewriteOptions(card, row){
     const sel = getSelect(card); if (!sel) return 0;
     let changed = 0;
@@ -307,21 +342,17 @@
       if (val != null){
         const next = `${cat} - ${fmt(val)}`;
         if (opt.textContent !== next){ opt.textContent = next; changed++; }
-        // IMPORTANT: keep the current price in the value so the cart logic can use it
+        // CRITICAL: set all the places the app might read from
         opt.value = String(val);
+        opt.dataset.price = String(val);
+        opt.setAttribute('value', String(val));
+        opt.setAttribute('data-price', String(val));
+        opt.setAttribute('data-amount', String(val));
       }
     });
+    // Nudge React/Vue to notice changes
+    sel.dispatchEvent(new Event('change', { bubbles:true }));
     return changed;
-  }
-
-  function setGreenPrice(el, num){
-    if (!el) return;
-    el.textContent = fmt(num);
-    try{
-      const cls = el.classList;
-      const hasGreen = Array.from(cls).some(c => c === 'text-success' || c.startsWith('text-green'));
-      if (!hasGreen) cls.add('text-green-600','font-semibold');
-    }catch{}
   }
 
   function syncCardPrice(card, row){
@@ -332,29 +363,22 @@
     const val = row[labelToCol(cat)] ?? row.p9;
     if (val == null) return false;
     setGreenPrice(gre, val);
+    stampPriceTargets(card, val);
     return true;
   }
 
   function applyToAllCards(){
     const cards = findCards();
-    let rewrote=0, changed=0;
+    let rewrote=0, changed=0, missing=[];
     for (const c of cards){
       const row = resolveRowByCard(c);
-      if (!row) continue;
+      if (!row){ missing.push((getNameEl(c)?.textContent||'').trim()); continue; }
       rewrote += rewriteOptions(c, row);
       if (syncCardPrice(c, row)) changed++;
-
-      const sel = getSelect(c);
-      if (sel && !sel.dataset.psBound){
-        sel.addEventListener('change', () => {
-          const r = resolveRowByCard(c);
-          if (r) syncCardPrice(c, r);
-        });
-        sel.dataset.psBound = '1';
-      }
     }
-    if (rewrote) console.log('[ps-sync] rewrote option labels on', rewrote, 'options');
-    if (changed) console.log('[ps-sync] updated green price on', changed, 'cards');
+    if (rewrote) console.log('[ps-sync v7] rewrote option labels on', rewrote, 'options');
+    if (changed) console.log('[ps-sync v7] updated green price on', changed, 'cards');
+    if (missing.length) console.warn('[ps-sync v7] titles not matched (add ALIAS if needed):', missing.slice(0,5), '… total:', missing.length);
   }
 
   // ---------- cart overlay ----------
@@ -380,7 +404,6 @@
 
   function syncCart(){
     const root = cartRoot(); if (!root || !INDEX) return;
-    // pick likely item containers by presence of "Expiration:" text under them
     const items = [...root.querySelectorAll('*')]
       .filter(n => /^Expiration:/i.test((n.textContent||'').trim()))
       .map(n => n.closest('*')).filter(Boolean);
@@ -388,32 +411,30 @@
     let changed = 0;
     for (const item of items){
       const title = itemTitleInCart(item);
-      const key = norm(title);
+      const key = norm(ALIAS[title] || title);
       const row = INDEX.get(key); if (!row) continue;
+      const want = ( row[labelToCol(itemExpirationLabel(item))] ?? row.p9 );
+      if (want == null) continue;
 
-      const cat = itemExpirationLabel(item);
-      const val = row[labelToCol(cat)] ?? row.p9; if (val == null) continue;
-
-      const node = firstDollarNode(item);
-      if (node && node.textContent.trim() !== fmt(val)){
-        node.textContent = fmt(val);
+      const display = firstDollarNode(item);
+      if (display && display.textContent.trim() !== fmt(want)){
+        display.textContent = fmt(want);
         changed++;
       }
     }
-    if (changed) console.log('[ps-sync] cart updated items:', changed);
+    if (changed) console.log('[ps-sync v7] cart updated items:', changed);
   }
 
   // keep cart in sync after adds
   document.addEventListener('click', e => {
     const b = e.target.closest('button');
     if (b && /add to sale/i.test(b.textContent||'')){
-      // give the SPA time to render the drawer, then fix prices
       setTimeout(syncCart, 250);
       setTimeout(syncCart, 700);
     }
   });
 
-  // ---------- CSV load (Papa or fetch) ----------
+  // ---------- CSV load ----------
   function tinyParseCSV(txt){
     const lines = txt.split(/\r?\n/).filter(Boolean);
     const hdr = (lines.shift() || '').split(',').map(h=>h.trim());
@@ -431,24 +452,34 @@
       Papa.parse(CSV_URL + '&cb=' + Date.now(), {
         download:true, header:true, skipEmptyLines:true,
         complete: res => run(res.data),
-        error: e => console.error('[ps-sync] CSV load error', e),
+        error: e => console.error('[ps-sync v7] CSV load error', e),
       });
     } else {
       fetch(CSV_URL + '&cb=' + Date.now())
         .then(r => r.ok ? r.text() : Promise.reject(r.status))
         .then(t => run(tinyParseCSV(t)))
-        .catch(e => console.error('[ps-sync] CSV fetch error', e));
+        .catch(e => console.error('[ps-sync v7] CSV fetch error', e));
     }
   }
 
-  // Start shortly after ps-lite finishes its first pass
   setTimeout(start, 400);
 
   // Re-apply if SPA re-renders
   const mo = new MutationObserver(() => { clearTimeout(mo.t); mo.t = setTimeout(applyToAllCards, 120); });
   mo.observe(document.body, { childList:true, subtree:true });
+
+  // tiny debugger you can run from Console:
+  window.__PS_DEBUG__ = () => {
+    const out = findCards().slice(0,5).map(c => {
+      const t = (getNameEl(c)?.textContent||'').trim();
+      const row = resolveRowByCard(c);
+      return {title:t, matched: !!row, row};
+    });
+    console.table(out);
+  };
 })();
 </script>
+
 
 
 
