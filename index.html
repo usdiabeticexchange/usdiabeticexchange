@@ -218,32 +218,36 @@
 
 <script>
 (() => {
-  if (window.__PS_ADDON_V3__) return; window.__PS_ADDON_V3__ = true;
-  console.log('[ps-addon v3] start');
+  // prevent duplicates
+  if (window.__PS_ADDON_V4__) return; window.__PS_ADDON_V4__ = true;
+  console.log('[ps-addon v4] init');
 
   const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
 
+  // ---------- utils ----------
   const fmt   = n => '$' + Number(n).toFixed(2);
   const toNum = v => { const n = Number(String(v ?? '').replace(/[^\d.]/g,'')); return Number.isFinite(n)?n:null; };
   const norm  = s => (s||'').toLowerCase().replace(/™|®/g,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
   const baseLabel = txt => String(txt||'').replace(/\s*-\s*\$[\d.,]+$/,'').trim();
 
   const labelToCol = (label) =>
-    /\b6\s*months?/i.test(label) ? 'p6' :
-    /\b7\s*[-–]?\s*8|\b7-8/i.test(label) ? 'p78' : 'p9';
+    /\b6\s*months?/i.test(label) ? 'p6'
+    : /\b7\s*[-–]?\s*8|\b7-8/i.test(label) ? 'p78'
+    : 'p9';
 
-  // Put any manual fixes here if needed later
+  // manual fixes if any title doesn't match your sheet name exactly
   const ALIAS = {
     // 'OneTouch Ultra 50 Ct.': 'OneTouch Ultra 50 Ct.',
   };
 
-  let INDEX = null;           // Map<normalizedName, {p9,p78,p6}>
-  window.__PS_INDEX__ = () => INDEX; // debug helper
+  let INDEX = null; // Map<normalizedName, {p9,p78,p6}>
 
-  // ---------- Card & cart helpers ----------
+  // ---------- DOM helpers ----------
+  const addToSaleButtons = () =>
+    [...document.querySelectorAll('button')].filter(b => /add to sale/i.test(b.textContent||''));
+
   const findCards = () => {
-    const btns = [...document.querySelectorAll('button')]
-      .filter(b => /add to sale/i.test(b.textContent||''));
+    const btns = addToSaleButtons();
     const cards = [];
     for (const b of btns){
       let root = b.closest('[data-product-card], .product-card, .bg-white, .card') || b.parentElement;
@@ -282,7 +286,7 @@
     return after;
   };
 
-  // ---------- Sheet index & match ----------
+  // ---------- sheet index ----------
   function buildIndex(rows){
     const map = new Map();
     for (const r of rows){
@@ -295,11 +299,12 @@
         p6:  toNum(r['6 months until expiration']   ?? r.price_6   ?? r['6']   ?? r['6 mo']),
       });
     }
-    console.log('[ps-addon v3] sheet rows indexed:', map.size);
+    console.log('[ps-addon v4] sheet rows indexed:', map.size);
     return map;
   }
 
   function resolveRow(visibleName){
+    if (!INDEX) return null;
     const alias = ALIAS[visibleName] || visibleName;
     const key = norm(alias);
     if (INDEX.has(key)) return INDEX.get(key);
@@ -317,7 +322,7 @@
     return score>=2 ? best : null;
   }
 
-  // ---------- Rewrite card ----------
+  // ---------- card & cart updates ----------
   function setGreenPrice(el, num){
     if (!el) return;
     el.textContent = fmt(num);
@@ -352,7 +357,6 @@
     if (val != null) setGreenPrice(gre, val);
   }
 
-  // ---------- Cart sync ----------
   function priceFromRow(row, label){
     const col = labelToCol(label);
     return row[col] ?? row.p9;
@@ -360,8 +364,6 @@
 
   function syncCart(){
     const root = cartRoot(); if (!root || !INDEX) return;
-
-    // items that contain an “Expiration:” line
     const items = [...root.querySelectorAll('*')]
       .filter(n => /^Expiration:/i.test((n.textContent||'').trim()))
       .map(n => n.closest('*')).filter(Boolean);
@@ -378,31 +380,32 @@
         changed++;
       }
     }
-
-    // Fix a “Total value: $…” banner if present
-    const totals = [...document.querySelectorAll('*')].filter(n => /Total value:/i.test(n.textContent||''));
-    if (totals.length){
-      const priceNodes = [...root.querySelectorAll('*')].filter(n => /\$\s*\d/.test(n.textContent||''));
-      const nums = priceNodes.map(n => Number(n.textContent.replace(/[^0-9.]/g,''))).filter(Number.isFinite);
-      const total = nums.reduce((a,b)=>a+b,0);
-      totals.forEach(n => n.textContent = n.textContent.replace(/\$\s*[\d.,]+/, fmt(total)));
-    }
-
-    if (changed) console.log('[ps-addon v3] cart updated items:', changed);
+    if (changed) console.log('[ps-addon v4] cart updated items:', changed);
   }
 
   function applyEverywhere(){
+    if (!INDEX) { /* wait for sheet */ return; }
+
     const cards = findCards();
-    console.log('[ps-addon v3] cards found:', cards.length);
-    let optChanges = 0, nameSamples = [];
+    console.log('[ps-addon v4] cards found:', cards.length);
+
+    let optChanges = 0, changedPrices = 0, missing = [];
+    let samples = [];
+
     for (const c of cards){
       const name = (getNameEl(c)?.textContent || '').trim();
-      if (nameSamples.length < 3) nameSamples.push(name);
-      const row = resolveRow(name); if (!row) continue;
-      optChanges += rewriteOptions(c, row);
-      syncCardPrice(c, row);
+      if (samples.length < 3) samples.push(name);
 
-      // bind select change per card
+      const row = resolveRow(name);
+      if (!row) { missing.push(name); continue; }
+
+      optChanges += rewriteOptions(c, row);
+
+      const before = (getPriceEl(c)?.textContent || '').trim();
+      syncCardPrice(c, row);
+      const after  = (getPriceEl(c)?.textContent || '').trim();
+      if (before !== after) changedPrices++;
+
       const sel = c.querySelector('select');
       if (sel && !sel.dataset.psBound){
         sel.addEventListener('change', () => {
@@ -412,12 +415,16 @@
         sel.dataset.psBound = '1';
       }
     }
-    console.log('[ps-addon v3] sample card names:', nameSamples);
-    if (optChanges) console.log('[ps-addon v3] rewrote option labels on', optChanges, 'options');
+
+    console.log('[ps-addon v4] sample names:', samples);
+    if (missing.length) console.warn('[ps-addon v4] titles not matched (add ALIAS if needed):', missing);
+    if (optChanges)     console.log('[ps-addon v4] rewrote option labels on', optChanges, 'options');
+    if (changedPrices)  console.log('[ps-addon v4] updated green price on', changedPrices, 'cards');
+
     syncCart();
   }
 
-  // ---------- CSV load (Papa if present; fetch fallback) ----------
+  // ---------- CSV load (Papa or fetch) ----------
   function tinyParseCSV(txt){
     const lines = txt.split(/\r?\n/).filter(Boolean);
     const hdr = (lines.shift() || '').split(',').map(h=>h.trim());
@@ -429,35 +436,40 @@
   }
 
   function start(){
+    const run = rows => { INDEX = buildIndex(rows); applyEverywhere(); setTimeout(applyEverywhere,300); setTimeout(applyEverywhere,1000); };
+
     if (window.Papa){
       Papa.parse(CSV_URL + '&cb=' + Date.now(), {
         download:true, header:true, skipEmptyLines:true,
-        complete: res => { INDEX = buildIndex(res.data); applyEverywhere(); },
-        error: e => console.error('[ps-addon v3] CSV load error', e),
+        complete: res => run(res.data),
+        error: e => console.error('[ps-addon v4] CSV load error', e),
       });
     } else {
       fetch(CSV_URL + '&cb=' + Date.now())
         .then(r => r.ok ? r.text() : Promise.reject(r.status))
-        .then(t => { INDEX = buildIndex(tinyParseCSV(t)); applyEverywhere(); })
-        .catch(e => console.error('[ps-addon v3] CSV fetch error', e));
+        .then(t => run(tinyParseCSV(t)))
+        .catch(e => console.error('[ps-addon v4] CSV fetch error', e));
     }
   }
 
-  // kick after ps-lite
-  setTimeout(start, 350);
+  // kick a moment after ps-lite logs its first pass
+  setTimeout(start, 400);
 
-  // re-run on SPA changes and clicks
+  // re-run when DOM changes, but it’s safe if INDEX isn’t ready yet
   const mo = new MutationObserver(() => { clearTimeout(mo.t); mo.t = setTimeout(applyEverywhere, 120); });
   mo.observe(document.body, { childList:true, subtree:true });
 
+  // keep cart in sync after adds
   document.addEventListener('click', e => {
-    if (e.target.closest('button') && /add to sale/i.test(e.target.closest('button').textContent||'')){
+    const b = e.target.closest('button');
+    if (b && /add to sale/i.test(b.textContent||'')){
       setTimeout(syncCart, 250);
       setTimeout(syncCart, 700);
     }
   });
 
-  window.__PS_SYNC__ = () => applyEverywhere(); // manual trigger if needed
+  // manual trigger if you want to test in console
+  window.__PS_SYNC__ = () => applyEverywhere();
 })();
 </script>
 
