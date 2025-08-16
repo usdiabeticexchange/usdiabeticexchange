@@ -218,8 +218,8 @@
 
 <script>
 (() => {
-  if (window.__PS_SYNC_V7__) return; window.__PS_SYNC_V7__ = true;
-  console.log('[ps-sync v7] init');
+  if (window.__PS_SYNC_V71__) return; window.__PS_SYNC_V71__ = true;
+  console.log('[ps-sync v7.1] init');
 
   const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
 
@@ -234,10 +234,10 @@
     : /\b7\s*[-–]?\s*8|\b7-8/i.test(label) ? 'p78'
     : 'p9';
 
-  // If any visible title on the site differs from the sheet, map it here:
+  // If a visible card title differs from the sheet name, add it here:
   const ALIAS = {
-    // 'Freestyle Lite 100 Ct.' : 'Freestyle Lite 100 Ct', // example (punctuation/casing differences)
-    // 'FreeStyle Lite 50 Ct.'  : 'Freestyle Lite 50 Ct',
+    // Example:
+    // 'OneTouch Ultra 50 Ct.' : 'OneTouch Ultra 50 Ct',
   };
 
   // ---------- sheet index ----------
@@ -255,7 +255,7 @@
         p6 : toNum(r['6 months until expiration']   ?? r.price_6     ?? r['6']   ?? r['6 mo']),
       });
     }
-    console.log('[ps-sync v7] sheet rows indexed:', map.size);
+    console.log('[ps-sync v7.1] sheet rows indexed:', map.size);
     return map;
   }
 
@@ -292,7 +292,7 @@
     const key = norm(alias);
     if (INDEX.has(key)) return INDEX.get(key);
 
-    // fuzzy fallback (token-score with bonus for numbers/long tokens)
+    // fuzzy fallback
     let best=null, score=-1;
     for (const [k,v] of INDEX){
       let s=0;
@@ -302,7 +302,7 @@
     return score>=2 ? best : null;
   }
 
-  // ---------- card updates ----------
+  // ---------- write helpers ----------
   function setGreenPrice(el, num){
     if (!el) return;
     el.textContent = fmt(num);
@@ -313,21 +313,22 @@
     }catch{}
   }
 
-  // Put the sheet price everywhere the app might read it
   function stampPriceTargets(card, price){
-    // 1) Add to Sale button data
+    // Add-to-sale button
     const btn = card.querySelector('button');
     if (btn){
+      ['data-price','data-amount','data-value'].forEach(a => btn.setAttribute(a, String(price)));
       btn.dataset.price = String(price);
-      btn.setAttribute('data-price', String(price));
-      btn.setAttribute('data-amount', String(price));
     }
-    // 2) Any obvious price holders on the card
+    // Obvious holders
     card.querySelectorAll('[data-price],[data-amount],[data-value]').forEach(n=>{
+      ['data-price','data-amount','data-value'].forEach(a => n.setAttribute(a, String(price)));
       n.dataset.price = String(price);
-      n.setAttribute('data-price', String(price));
-      n.setAttribute('data-amount', String(price));
-      n.setAttribute('data-value', String(price));
+    });
+    // Hidden inputs that look like price fields
+    card.querySelectorAll('input[type="hidden"]').forEach(h=>{
+      const idc = (h.id||'') + ' ' + (h.name||'') + ' ' + (h.className||'');
+      if (/price|amount|value/i.test(idc)) h.value = String(price);
     });
   }
 
@@ -341,16 +342,18 @@
       const val = row[col] ?? row.p9;
       if (val != null){
         const next = `${cat} - ${fmt(val)}`;
-        if (opt.textContent !== next){ opt.textContent = next; changed++; }
-        // CRITICAL: set all the places the app might read from
+        if (opt.textContent !== next){ changed++; }
+        // Write everywhere
+        opt.textContent = next;
+        opt.label = next;
+        opt.text  = next;
         opt.value = String(val);
+        ['data-price','data-amount','data-value'].forEach(a => opt.setAttribute(a, String(val)));
         opt.dataset.price = String(val);
-        opt.setAttribute('value', String(val));
-        opt.setAttribute('data-price', String(val));
-        opt.setAttribute('data-amount', String(val));
       }
     });
-    // Nudge React/Vue to notice changes
+    // Nudge frameworks to pick up changes
+    sel.dispatchEvent(new Event('input',  { bubbles:true }));
     sel.dispatchEvent(new Event('change', { bubbles:true }));
     return changed;
   }
@@ -367,7 +370,7 @@
     return true;
   }
 
-  function applyToAllCards(){
+  function applyToAllCards(tag=''){
     const cards = findCards();
     let rewrote=0, changed=0, missing=[];
     for (const c of cards){
@@ -376,12 +379,11 @@
       rewrote += rewriteOptions(c, row);
       if (syncCardPrice(c, row)) changed++;
     }
-    if (rewrote) console.log('[ps-sync v7] rewrote option labels on', rewrote, 'options');
-    if (changed) console.log('[ps-sync v7] updated green price on', changed, 'cards');
-    if (missing.length) console.warn('[ps-sync v7] titles not matched (add ALIAS if needed):', missing.slice(0,5), '… total:', missing.length);
+    console.log(`[ps-sync v7.1] cards:${cards.length}  optionsRewritten:${rewrote}  greenUpdated:${changed}` + (tag?` (${tag})`:``));
+    if (missing.length) console.warn('[ps-sync v7.1] titles NOT matched (add ALIAS):', missing);
   }
 
-  // ---------- cart overlay ----------
+  // ---------- cart ----------
   const cartRoot = () =>
     document.querySelector('[role="dialog"], [aria-modal="true"], [class*="drawer"], [data-cart], .cart');
 
@@ -411,21 +413,19 @@
     let changed = 0;
     for (const item of items){
       const title = itemTitleInCart(item);
-      const key = norm(ALIAS[title] || title);
-      const row = INDEX.get(key); if (!row) continue;
+      const row = INDEX.get(norm(ALIAS[title] || title)); if (!row) continue;
       const want = ( row[labelToCol(itemExpirationLabel(item))] ?? row.p9 );
       if (want == null) continue;
 
-      const display = firstDollarNode(item);
-      if (display && display.textContent.trim() !== fmt(want)){
-        display.textContent = fmt(want);
+      const node = firstDollarNode(item);
+      if (node && node.textContent.trim() !== fmt(want)){
+        node.textContent = fmt(want);
         changed++;
       }
     }
-    if (changed) console.log('[ps-sync v7] cart updated items:', changed);
+    if (changed) console.log('[ps-sync v7.1] cart updated items:', changed);
   }
 
-  // keep cart in sync after adds
   document.addEventListener('click', e => {
     const b = e.target.closest('button');
     if (b && /add to sale/i.test(b.textContent||'')){
@@ -446,37 +446,34 @@
   }
 
   function start(){
-    const run = rows => { INDEX = buildIndex(rows); applyToAllCards(); setTimeout(applyToAllCards,300); };
+    const run = rows => { INDEX = buildIndex(rows); applyToAllCards('initial'); setTimeout(()=>applyToAllCards('recheck'),300); };
 
     if (window.Papa){
       Papa.parse(CSV_URL + '&cb=' + Date.now(), {
         download:true, header:true, skipEmptyLines:true,
         complete: res => run(res.data),
-        error: e => console.error('[ps-sync v7] CSV load error', e),
+        error: e => console.error('[ps-sync v7.1] CSV load error', e),
       });
     } else {
       fetch(CSV_URL + '&cb=' + Date.now())
         .then(r => r.ok ? r.text() : Promise.reject(r.status))
         .then(t => run(tinyParseCSV(t)))
-        .catch(e => console.error('[ps-sync v7] CSV fetch error', e));
+        .catch(e => console.error('[ps-sync v7.1] CSV fetch error', e));
     }
   }
 
   setTimeout(start, 400);
 
-  // Re-apply if SPA re-renders
-  const mo = new MutationObserver(() => { clearTimeout(mo.t); mo.t = setTimeout(applyToAllCards, 120); });
+  // Re-apply on SPA mutations
+  const mo = new MutationObserver(() => { clearTimeout(mo.t); mo.t = setTimeout(()=>applyToAllCards('mutation'), 120); });
   mo.observe(document.body, { childList:true, subtree:true });
 
-  // tiny debugger you can run from Console:
-  window.__PS_DEBUG__ = () => {
-    const out = findCards().slice(0,5).map(c => {
-      const t = (getNameEl(c)?.textContent||'').trim();
-      const row = resolveRowByCard(c);
-      return {title:t, matched: !!row, row};
-    });
-    console.table(out);
-  };
+  // small console helpers
+  window.__PS_DEBUG__ = () => findCards().slice(0,5).map(c=>({
+    title:(getNameEl(c)?.textContent||'').trim(),
+    matched: !!resolveRowByCard(c)
+  }));
+  window.__PS_FORCE__ = () => applyToAllCards('manual');
 })();
 </script>
 
