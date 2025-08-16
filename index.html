@@ -218,8 +218,8 @@
 
 <script>
 (() => {
-  if (window.__PS_SYNC_V72__) return; window.__PS_SYNC_V72__ = true;
-  console.log('[ps-sync v7.2] init');
+  if (window.__PS_SYNC_V73__) return; window.__PS_SYNC_V73__ = true;
+  console.log('[ps-sync v7.3] init');
 
   const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
 
@@ -234,9 +234,8 @@
     : /\b7\s*[-–]?\s*8|\b7-8/i.test(label) ? 'p78'
     : 'p9';
 
-  // Alias map: visible card title -> sheet name
+  // Fix trailing-dot case from your logs
   const ALIAS = {
-    // Fix trailing dot case you’re seeing in logs:
     'OneTouch Ultra 50 Ct.' : 'OneTouch Ultra 50 Ct',
   };
 
@@ -255,7 +254,7 @@
         p6 : toNum(r['6 months until expiration']   ?? r.price_6     ?? r['6']   ?? r['6 mo']),
       });
     }
-    console.log('[ps-sync v7.2] sheet rows indexed:', map.size);
+    console.log('[ps-sync v7.3] sheet rows indexed:', map.size);
     return map;
   }
 
@@ -267,20 +266,29 @@
     return cands[0] || null;
   };
 
-  // NEW: find cards by SELECTs so we catch every card reliably
   function findCards(){
-    const sels = [...document.querySelectorAll('select')];
-    const cards = [];
-    for (const sel of sels){
-      let root = sel.closest('[data-product-card], .product-card, .bg-white, .card') || sel.parentElement;
-      for (let i=0;i<8 && root;i++){
-        // stop when we have both a name and a price holder
-        if (getNameEl(root) && (getPriceEl(root) || root.querySelector('[class*="text-green"]'))) break;
-        root = root.parentElement;
+    const roots = new Set();
+
+    const addRoot = (node) => {
+      let r = node.closest('[data-product-card], .product-card, .bg-white, .card') || node.parentElement;
+      for (let i=0; i<8 && r; i++){
+        if (getNameEl(r) && (getPriceEl(r) || r.querySelector('select'))) break;
+        r = r.parentElement;
       }
-      if (root && !cards.includes(root)) cards.push(root);
-    }
-    return cards;
+      if (r) roots.add(r);
+    };
+
+    const btns = [...document.querySelectorAll('button')].filter(b => /add to sale/i.test(b.textContent||''));
+    btns.forEach(addRoot);
+
+    const sels = [...document.querySelectorAll('select')];
+    sels.forEach(addRoot);
+
+    const greens = [...document.querySelectorAll('[data-price], .price, .product-price, .price-value, .text-success, .text-green-600, .text-green-700, [class*="text-green"]')];
+    greens.forEach(addRoot);
+
+    console.log('[ps-sync v7.3] probe  buttons=' + btns.length + '  selects=' + sels.length + '  greens=' + greens.length + '  -> cards=' + roots.size);
+    return [...roots];
   }
 
   function resolveRowByCard(card){
@@ -313,9 +321,8 @@
   }
 
   function stampPriceTargets(card, price){
-    // button & common data-* places
-    const btns = card.querySelectorAll('button');
-    btns.forEach(btn => {
+    // Buttons & common data-* attrs
+    card.querySelectorAll('button').forEach(btn=>{
       ['data-price','data-amount','data-value'].forEach(a => btn.setAttribute(a, String(price)));
       btn.dataset.price = String(price);
     });
@@ -323,7 +330,7 @@
       ['data-price','data-amount','data-value'].forEach(a => n.setAttribute(a, String(price)));
       n.dataset.price = String(price);
     });
-    // hidden inputs that look like price fields
+    // Hidden inputs that look like price fields
     card.querySelectorAll('input[type="hidden"]').forEach(h=>{
       const idc = (h.id||'') + ' ' + (h.name||'') + ' ' + (h.className||'');
       if (/price|amount|value/i.test(idc)) h.value = String(price);
@@ -341,7 +348,7 @@
       if (val != null){
         const next = `${cat} - ${fmt(val)}`;
         if (opt.textContent !== next) changed++;
-        // Write everywhere the app might read:
+        // Update everything the app might read:
         opt.textContent = next;
         opt.label = next;
         opt.text  = next;
@@ -350,7 +357,6 @@
         opt.dataset.price = String(val);
       }
     });
-    // Nudge frameworks to pick up the changes
     sel.dispatchEvent(new Event('input',  { bubbles:true }));
     sel.dispatchEvent(new Event('change', { bubbles:true }));
     return changed;
@@ -376,9 +382,18 @@
       if (!row){ missing.push((getNameEl(c)?.textContent||'').trim()); continue; }
       rewrote += rewriteOptions(c, row);
       if (syncCardPrice(c, row)) changed++;
+      // keep selection in sync when user changes it
+      const sel = c.querySelector('select');
+      if (sel && !sel.dataset.psBound){
+        sel.addEventListener('change', () => {
+          const r = resolveRowByCard(c);
+          if (r) syncCardPrice(c, r);
+        });
+        sel.dataset.psBound = '1';
+      }
     }
-    console.log(`[ps-sync v7.2] cards:${cards.length}  optionsRewritten:${rewrote}  greenUpdated:${changed}` + (tag?` (${tag})`:``));
-    if (missing.length) console.warn('[ps-sync v7.2] titles NOT matched (add ALIAS):', missing);
+    console.log(`[ps-sync v7.3] cards:${cards.length}  optionsRewritten:${rewrote}  greenUpdated:${changed}` + (tag?` (${tag})`:``));
+    if (missing.length) console.warn('[ps-sync v7.3] titles NOT matched (add ALIAS):', missing);
   }
 
   // ---------- cart ----------
@@ -416,7 +431,7 @@
       const want = ( row[labelToCol(itemExpirationLabel(item))] ?? row.p9 );
       if (want == null) continue;
 
-      // Update ALL $ nodes inside this item (per-unit and total)
+      // Update all $ nodes (unit & total) inside the item
       const nodes = firstDollarNodes(item);
       nodes.forEach(node => {
         if (node.textContent.trim() !== fmt(want)){
@@ -425,7 +440,7 @@
         }
       });
     }
-    if (changed) console.log('[ps-sync v7.2] cart updated $ nodes:', changed);
+    if (changed) console.log('[ps-sync v7.3] cart updated $ nodes:', changed);
   }
 
   document.addEventListener('click', e => {
@@ -454,13 +469,13 @@
       Papa.parse(CSV_URL + '&cb=' + Date.now(), {
         download:true, header:true, skipEmptyLines:true,
         complete: res => run(res.data),
-        error: e => console.error('[ps-sync v7.2] CSV load error', e),
+        error: e => console.error('[ps-sync v7.3] CSV load error', e),
       });
     } else {
       fetch(CSV_URL + '&cb=' + Date.now())
         .then(r => r.ok ? r.text() : Promise.reject(r.status))
         .then(t => run(tinyParseCSV(t)))
-        .catch(e => console.error('[ps-sync v7.2] CSV fetch error', e));
+        .catch(e => console.error('[ps-sync v7.3] CSV fetch error', e));
     }
   }
 
@@ -472,10 +487,6 @@
 
   // console helpers
   window.__PS_FORCE__ = () => applyToAllCards('manual');
-  window.__PS_DEBUG__ = () => findCards().slice(0,5).map(c=>({
-    title:(getNameEl(c)?.textContent||'').trim(),
-    matched: !!resolveRowByCard(c)
-  }));
 })();
 </script>
 
