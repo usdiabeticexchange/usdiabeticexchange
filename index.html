@@ -78,19 +78,26 @@
   const addToSaleButtons = () =>
     [...document.querySelectorAll('button')].filter(b => /add to sale/i.test(b.textContent||''));
 
-  const findCards = () => {
-    const btns = addToSaleButtons();
-    const cards = [];
-    for (const b of btns){
-      let root = b.closest('[data-product-card], .product-card, .bg-white, .card') || b.parentElement;
-      for (let i=0;i<8 && root;i++){
-        if (getNameEl(root) && root.querySelector('select')) break;
-        root = root.parentElement;
-      }
-      if (root && !cards.includes(root)) cards.push(root);
-    }
-    return cards;
-  };
+  function findCards(){
+  const set = new Set();
+
+  // Primary: find cards by their expiration <select>
+  document.querySelectorAll('select').forEach(sel => {
+    if (!looksLikeExpirySelect(sel)) return;
+    const root = cardRootFrom(sel);
+    if (root) set.add(root);
+  });
+
+  // Fallback: if some cards don’t have the select yet, try “Add to Sale” buttons too
+  [...document.querySelectorAll('button')].forEach(b => {
+    if (!/add to sale/i.test(b.textContent || '')) return;
+    const root = cardRootFrom(b);
+    if (root) set.add(root);
+  });
+
+  return [...set];
+}
+
 
   const getNameEl = c =>
     c.querySelector('[data-product-name], .product-name, .card-title, h3, h4, .title');
@@ -138,7 +145,24 @@
     setGreenPrice(gre, val);
     return before !== gre.textContent.trim();
   }
+// Treat any select whose options mention "months ... until expiration" as a card-select
+const looksLikeExpirySelect = (sel) =>
+  !![...sel.options].find(o => /\bmonths?\b.*\buntil\b.*\bexpiration\b/i.test(o.textContent || ''));
 
+// Walk up to the card container (works with your markup)
+function cardRootFrom(el){
+  let root = el.closest('[data-product-card], .product-card, .bg-white, .card') || el.parentElement;
+  for (let i = 0; i < 8 && root; i++){
+    // stop when we can see a title and (a price or a green price element)
+    if ( (root.querySelector('[data-product-name], .product-name, .card-title, h3, h4, .title')) &&
+         (root.querySelector('[data-price], .price, .product-price, .price-value, .text-success, [class*="text-green"]')) ) {
+      break;
+    }
+    root = root.parentElement;
+  }
+  return root || null;
+}
+  
   function applyAcrossCards(){
     if (!IDX) return;
     const cards = findCards();
