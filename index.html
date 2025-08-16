@@ -221,9 +221,10 @@
   if (window.__PS_ADDON__) return; window.__PS_ADDON__ = true;
   console.log('[ps-addon] loaded');
 
-  // Use the same sheet as ps-lite
+  // --- CONFIG: your published CSV (same as ps-lite) ---
   const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
 
+  // Map dropdown label -> sheet column
   const pickCol = (label) => {
     const t = String(label || '');
     if (/\b6\s*months?/i.test(t)) return 'p6';
@@ -244,7 +245,7 @@
 
   const stripTrailingPrice = (txt) => String(txt||'').replace(/\s*-\s*\$[\d.,]+$/, '').trim();
 
-  // Optional aliases for card titles → sheet names
+  // Optional renames if a card title differs a lot from the sheet
   const ALIAS = {
     // 'OneTouch Ultra 50 Ct.': 'OneTouch Ultra 50 Ct.',
   };
@@ -272,9 +273,10 @@
     const key = norm(alias);
     if (!key) return null;
 
+    // Exact
     if (INDEX.has(key)) return INDEX.get(key);
 
-    // Fuzzy fallback
+    // Fuzzy (token overlap)
     const tokens = key.split(' ').filter(Boolean);
     let best=null, score=-1;
     for (const [k,row] of INDEX){
@@ -324,9 +326,8 @@
     return document.querySelector('[role="dialog"], [aria-modal="true"], [class*="drawer"], [data-cart], .cart');
   }
   function findCartItems(root){
-    // Rows that have a line starting with “Expiration:”
-    return [...root.querySelectorAll('*')]
-      .filter(n => /^Expiration:/i.test((n.textContent||'').trim()))
+    // Rows that contain a line beginning with "Expiration:"
+    return [...root.querySelectorAll('*')].filter(n => /^Expiration:/i.test((n.textContent||'').trim()))
       .map(n => n.closest('*')).filter(Boolean);
   }
   function textPriceNodes(scope){
@@ -343,7 +344,7 @@
       const nameEl = item.querySelector('h1,h2,h3,h4,.title,.font-medium,[data-product-name]') || item;
       const name   = (nameEl.textContent||'').trim();
 
-      const expLine  = [...item.querySelectorAll('*')].find(n => /^Expiration:/i.test((n.textContent||'').trim()));
+      const expLine = [...item.querySelectorAll('*')].find(n => /^Expiration:/i.test((n.textContent||'').trim()));
       const expLabel = expLine ? expLine.textContent.split(':').slice(1).join(':').trim() : '9+ months until expiration';
 
       const row = resolveRowByName(name);
@@ -358,12 +359,13 @@
         changed++;
       }
     }
+
     if (changed) console.log('[ps-addon] cart updated items:', changed);
 
     // Optional: refresh an obvious "Total value: $…" banner outside the drawer
     const totals = [...document.querySelectorAll('*')].filter(n => /Total value:/i.test(n.textContent||''));
     if (totals.length){
-      const dollars = textPriceNodes(root).map(n => Number(n.textContent.replace(/[^0-9.]/g,''))).filter(Number.isFinite);
+      const dollars = textPriceNodes(root).map(n => Number(n.textContent.replace(/[^0-9.]/g,''))).filter(n => Number.isFinite(n));
       if (dollars.length){
         const sum = dollars.reduce((a,b)=>a+b,0);
         totals.forEach(n => n.textContent = n.textContent.replace(/\$\s*[\d.,]+/, fmt(sum)));
@@ -371,7 +373,7 @@
     }
   }
 
-  // ---------- Load CSV & hydrate ----------
+  // ---------- Load CSV (Papa if available; otherwise light fallback) ----------
   function hydrate(rows){
     INDEX = buildIndex(rows);
     scanCardsForOptions();
@@ -404,10 +406,10 @@
     }
   }
 
-  // First run (after ps-lite has drawn)
-  setTimeout(loadSheet, 300);
+  // First run (give ps-lite a moment to render)
+  setTimeout(() => { loadSheet(); }, 300);
 
-  // Re-run when DOM changes (drawer open, tab switch, route changes)
+  // Re-run on DOM changes (drawer open, tab switch, SPA navigation, etc.)
   const mo = new MutationObserver(() => {
     clearTimeout(mo.tid);
     mo.tid = setTimeout(() => {
@@ -417,7 +419,7 @@
   });
   mo.observe(document.body, { childList:true, subtree:true });
 
-  // Also re-sync shortly after “Add to Sale” clicks
+  // Also re-sync after "Add to Sale" clicks
   document.addEventListener('click', (e) => {
     const btn = e.target.closest('button');
     if (btn && /add to sale/i.test(btn.textContent || '')) {
@@ -425,14 +427,11 @@
     }
   });
 
-  // Manual helper in Console if needed:
-  window.__PS_ADDON_SYNC__ = () => {
-    scanCardsForOptions();
-    syncCartOnce();
-    console.log('[ps-addon] manual sync');
-  };
+  // Small helper you can run in Console to force a cart refresh:
+  window.__PS_ADDON_SYNC__ = () => { scanCardsForOptions(); syncCartOnce(); console.log('[ps-addon] manual sync'); };
 })();
 </script>
+
 
 
 
