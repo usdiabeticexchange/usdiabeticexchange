@@ -373,6 +373,19 @@
       const priceNode = textPriceNodes(item)[0];
       if (priceNode && priceNode.textContent.trim() !== fmt(val)){
         priceNode.textContent = fmt(val);
+
+        const priceTargets = [priceNode, item, ...item.querySelectorAll('input[type="hidden"], [data-price], [data-item-price], [data-price-each]')];
+        priceTargets.forEach(el => {
+          if ('value' in el) el.value = val;
+          if (el.dataset) {
+            Object.keys(el.dataset).forEach(k => {
+              if (/price/i.test(k)) el.dataset[k] = val;
+            });
+          }
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+
         changed++;
       }
     }
