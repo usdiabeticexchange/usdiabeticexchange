@@ -218,60 +218,85 @@
 
 <script>
 (() => {
-  if (window.__PS_SYNC_V74__) return; window.__PS_SYNC_V74__ = true;
-  console.log('[ps-sync v7.4] init');
+  if (window.__PS_SYNC_V75__) return; window.__PS_SYNC_V75__ = true;
+  console.log('[ps-sync v7.5] init');
 
   const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
 
   // ---------- utils ----------
   const fmt   = n => '$' + Number(n).toFixed(2);
   const toNum = v => { const n = Number(String(v ?? '').replace(/[^\d.]/g,'')); return Number.isFinite(n)?n:null; };
-  const norm  = s => (s||'').toLowerCase().replace(/™|®/g,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
-  const baseLabel = t => String(t||'').replace(/\s*[-–]?\s*\$[\d.,]+$/,'').trim();
+  const normBase = s => (s||'').toLowerCase()
+    .replace(/™|®/g,'')
+    .replace(/\b(count|counts|ct|cts)\b/g,'ct')
+    .replace(/[^a-z0-9]+/g,' ')
+    .replace(/\s+/g,' ')
+    .trim();
 
-  const labelToCol = (label) =>
+  const STOP = new Set(['test','tests','strip','strips','meter','sensors','sensor','pack','pk','box','only','mm','nm','kit','guide','brand','mfr','mail','order','and','or','for','with','one','by']);
+
+  const tokensOf = s => {
+    const t = normBase(s).split(' ').filter(Boolean);
+    // unique, drop stopwords but keep numbers and long tokens
+    const u = [];
+    const seen = new Set();
+    for (const w of t){
+      if (seen.has(w)) continue;
+      seen.add(w);
+      if (/^\d+$/.test(w) || w.length >= 3){
+        if (!STOP.has(w)) u.push(w);
+      }
+    }
+    return u;
+  };
+
+  const baseLabel = t => String(t||'').replace(/\s*[-–]?\s*\$[\d.,]+$/,'').trim();
+  const labelToCol = label =>
     /\b6\s*months?/i.test(label) ? 'p6'
     : /\b7\s*[-–]?\s*8|\b7-8/i.test(label) ? 'p78'
     : 'p9';
 
-  // quick filters for non-product tiles
   const looksLikeNoise = t => /don.?t see|your product|text us|meters|lancets|medtronic/i.test(t);
 
-  // minor alias nits
   const ALIAS = {
-    'OneTouch Ultra 50 Ct.' : 'OneTouch Ultra 50 Ct',
+    // Add any stubborn titles here if needed:
+    // 'OneTouch Ultra 50 Ct.' : 'OneTouch Ultra 50 Ct',
   };
 
   // ---------- sheet index ----------
-  let INDEX = null; // Map<normalizedName, {p9,p78,p6}>
+  let INDEX = null; // Array<{key, toks:Set, row:{p9,p78,p6}}>
   function buildIndex(rows){
-    const map = new Map();
+    const idx = [];
     for (const r of rows){
       const name = r.product_name || r.Product_Name || r.name || r.Name || r.product || r.Product;
       if (!name) continue;
-      const key = norm(name);
-      map.set(key, {
-        p9 : toNum(r['9+ months until expiration'] ?? r['9 months until expiration'] ?? r.price_9plus ?? r['9+'] ?? r['9_plus'] ?? r['9 mo']),
-        p78: toNum(r['7-8 months until expiration'] ?? r.price_7to8 ?? r['7-8'] ?? r['7_to_8'] ?? r['7-8 mo']),
-        p6 : toNum(r['6 months until expiration']   ?? r.price_6     ?? r['6']   ?? r['6 mo']),
+      const key = normBase(name);
+      idx.push({
+        key,
+        toks: new Set(tokensOf(name)),
+        row: {
+          p9 : toNum(r['9+ months until expiration'] ?? r['9 months until expiration'] ?? r.price_9plus ?? r['9+'] ?? r['9_plus'] ?? r['9 mo']),
+          p78: toNum(r['7-8 months until expiration'] ?? r.price_7to8 ?? r['7-8'] ?? r['7_to_8'] ?? r['7-8 mo']),
+          p6 : toNum(r['6 months until expiration']   ?? r.price_6     ?? r['6']   ?? r['6 mo']),
+        }
       });
     }
-    console.log('[ps-sync v7.4] sheet rows indexed:', map.size);
-    return map;
+    console.log('[ps-sync v7.5] sheet rows indexed:', idx.length);
+    return idx;
   }
 
   // ---------- DOM helpers ----------
-  const getNameEl  = c => c.querySelector('[data-product-name], .product-name, .card-title, h3, h4, .title');
-  const getPriceEl = c => {
+  const nameEl  = c => c.querySelector('[data-product-name], .product-name, .card-title, h3, h4, .title');
+  const priceEl = c => {
     const cands = c.querySelectorAll('[data-price], .price, .product-price, .price-value, .text-success, .text-green-600, .text-green-700, [class*="text-green"]');
     for (const el of cands) if (/\$\s*\d/.test((el.textContent||'').trim())) return el;
     return cands[0] || null;
   };
 
-  function addCandidateRoot(set, node){
+  function addCardRoot(set, node){
     let r = node.closest('[data-product-card], .product-card, .bg-white, .card') || node.parentElement;
-    for (let i=0; i<8 && r; i++){
-      if (getNameEl(r) && (getPriceEl(r) || r.querySelector('select'))) break;
+    for (let i=0;i<8 && r;i++){
+      if (nameEl(r) && (priceEl(r) || r.querySelector('select'))) break;
       r = r.parentElement;
     }
     if (r) set.add(r);
@@ -279,57 +304,61 @@
 
   function findCards(){
     const roots = new Set();
-    const btns = [...document.querySelectorAll('button')].filter(b => /add to sale/i.test(b.textContent||''));
-    const sels = [...document.querySelectorAll('select')];
+    const btns   = [...document.querySelectorAll('button')].filter(b => /add to sale/i.test(b.textContent||''));
+    const sels   = [...document.querySelectorAll('select')];
     const greens = [...document.querySelectorAll('[data-price], .price, .product-price, .price-value, .text-success, .text-green-600, .text-green-700, [class*="text-green"]')];
 
-    btns.forEach(n=>addCandidateRoot(roots,n));
-    sels.forEach(n=>addCandidateRoot(roots,n));
-    greens.forEach(n=>addCandidateRoot(roots,n));
+    btns.forEach(n=>addCardRoot(roots,n));
+    sels.forEach(n=>addCardRoot(roots,n));
+    greens.forEach(n=>addCardRoot(roots,n));
 
-    // final pass: drop obvious non-products
     const cards = [...roots].filter(r => {
-      const title = (getNameEl(r)?.textContent || '').trim();
+      const title = (nameEl(r)?.textContent || '').trim();
       return title && !looksLikeNoise(title);
     });
 
-    console.log('[ps-sync v7.4] probe  buttons=' + btns.length + '  selects=' + sels.length + '  greens=' + greens.length + '  -> cards=' + cards.length);
+    console.log('[ps-sync v7.5] probe buttons='+btns.length+' selects='+sels.length+' greens='+greens.length+' -> cards='+cards.length);
     return cards;
   }
 
-  function resolveRowByCard(card){
+  // ---------- matcher ----------
+  function resolveRow(card){
     if (!INDEX) return null;
-    const raw = (getNameEl(card)?.textContent || '').trim();
-    if (!raw || looksLikeNoise(raw)) return null;
-    const alias = ALIAS[raw] || raw;
-    const key = norm(alias);
+    const rawTitle = (nameEl(card)?.textContent || '').trim();
+    if (!rawTitle || looksLikeNoise(rawTitle)) return null;
 
-    if (INDEX.has(key)) return INDEX.get(key);
+    const alias = ALIAS[rawTitle] || rawTitle;
+    const key   = normBase(alias);
+    const toks  = tokensOf(alias);
+    if (!toks.length) return null;
 
-    // more forgiving fuzzy: accept best match if it shares any significant token
-    const toks = key.split(/\s+/).filter(Boolean);
-    let best=null, score=-1;
-    for (const [k,v] of INDEX){
-      let s=0;
+    let best = null, bestScore = -1;
+
+    for (const e of INDEX){
+      // Jaccard-ish + numeric boost
+      let inter = 0, nums = 0;
       for (const t of toks){
-        if (k.includes(t)){
-          s += ( /^\d+$/.test(t) ? 1.5 : t.length>=5 ? 1.1 : 0.9 );
-        }
+        if (e.toks.has(t)){ inter++; if (/^\d+$/.test(t)) nums++; }
       }
-      if (s>score){ score=s; best=v; }
+      const union = new Set([...toks, ...e.toks]).size;
+      const j = union ? inter/union : 0;
+      const score = j + nums*0.25 + (inter>=2?0.1:0); // gentle bias
+      if (score > bestScore){ bestScore = score; best = e; }
     }
-    // accept if we matched at least ~one solid token
-    return score >= 1 ? best : null;
+
+    // Accept with a low but safe threshold (handles Ct/Count etc.)
+    if (bestScore >= 0.32) return best.row;
+    return null;
   }
 
   // ---------- writers ----------
-  function setGreenPrice(el, num){
+  function setGreen(el, num){
     if (!el) return;
     el.textContent = fmt(num);
     try{
       const cls = el.classList;
-      const hasGreen = Array.from(cls).some(c => c === 'text-success' || c.startsWith('text-green'));
-      if (!hasGreen) cls.add('text-green-600','font-semibold');
+      const has = Array.from(cls).some(c => c === 'text-success' || c.startsWith('text-green'));
+      if (!has) cls.add('text-green-600','font-semibold');
     }catch{}
   }
 
@@ -359,68 +388,47 @@
       if (val != null){
         const next = `${cat} - ${fmt(val)}`;
         if (opt.textContent !== next) changed++;
-        // Update every attribute apps commonly read:
-        opt.textContent = next;
-        opt.label = next;
-        opt.text  = next;
-        opt.value = String(val);
+        opt.textContent = next; opt.label = next; opt.text = next; opt.value = String(val);
         ['data-price','data-amount','data-value'].forEach(a => opt.setAttribute(a, String(val)));
         opt.dataset.price = String(val);
       }
     });
-    // poke the framework
     sel.dispatchEvent(new Event('input',  { bubbles:true }));
     sel.dispatchEvent(new Event('change', { bubbles:true }));
     return changed;
   }
 
-  function syncCardPrice(card, row){
-    const sel = card.querySelector('select'), gre = getPriceEl(card);
-    if (!sel || !gre) return false;
-    const opt = sel.selectedOptions[0] || sel.options[sel.selectedIndex];
-    const cat = (opt?.dataset.psCat) || baseLabel(opt?.textContent || '9+ months');
-    const val = row[labelToCol(cat)] ?? row.p9;
-    if (val == null) return false;
-    setGreenPrice(gre, val);
-    stampPriceTargets(card, val);
-    return true;
-  }
-
-  function applyToAllCards(tag=''){
-    const cards = findCards();
-    let rewrote=0, changed=0, missing=[];
-    for (const c of cards){
-      const row = resolveRowByCard(c);
-      if (!row){ missing.push((getNameEl(c)?.textContent||'').trim()); continue; }
-      rewrote += rewriteOptions(c, row);
-      if (syncCardPrice(c, row)) changed++;
-      const sel = c.querySelector('select');
-      if (sel && !sel.dataset.psBound){
-        sel.addEventListener('change', () => {
-          const r = resolveRowByCard(c);
-          if (r) syncCardPrice(c, r);
-        });
-        sel.dataset.psBound = '1';
-      }
+  function syncCard(card, row){
+    const gre = priceEl(card);
+    const sel = card.querySelector('select');
+    // if no select rendered yet, default to 9+ months
+    let val = row.p9;
+    if (sel && sel.options.length){
+      const opt = sel.selectedOptions[0] || sel.options[sel.selectedIndex];
+      const cat = (opt?.dataset.psCat) || baseLabel(opt?.textContent || '9+ months');
+      val = row[labelToCol(cat)] ?? row.p9;
     }
-    console.log(`[ps-sync v7.4] cards:${cards.length}  optionsRewritten:${rewrote}  greenUpdated:${changed}` + (tag?` (${tag})`:``));
-    if (missing.length) console.warn('[ps-sync v7.4] titles NOT matched (add ALIAS if needed):', missing);
+    if (val == null) return false;
+    setGreen(gre, val);
+    stampPriceTargets(card, val);
+    // also store for cart override map
+    const title = (nameEl(card)?.textContent || '').trim();
+    if (title) PRICE_HINTS.set(title, val);
+    return true;
   }
 
   // ---------- cart sync ----------
   const cartRoot = () =>
     document.querySelector('[role="dialog"], [aria-modal="true"], [class*="drawer"], [data-cart], .cart');
 
-  function firstDollarNodes(scope){
+  function dollarNodes(scope){
     return [...scope.querySelectorAll('*')].filter(n => /\$\s*\d/.test((n.textContent||'').trim()));
   }
-
-  function itemTitleInCart(item){
+  function itemTitle(item){
     const t = item.querySelector('h1,h2,h3,h4,.title,.font-medium,[data-product-name]');
     return (t?.textContent || '').trim();
   }
-
-  function itemExpirationLabel(item){
+  function itemExpiry(item){
     const m = [...item.querySelectorAll('*')].find(n => /^Expiration:/i.test((n.textContent||'').trim()));
     if (!m) return '9+ months';
     const after = (m.textContent||'').split(':').slice(1).join(':').trim();
@@ -428,6 +436,8 @@
     if (/6/.test(after))           return '6 months';
     return '9+ months';
   }
+
+  const PRICE_HINTS = new Map(); // title -> last seen price on card
 
   function syncCart(){
     const root = cartRoot(); if (!root || !INDEX) return;
@@ -437,18 +447,29 @@
 
     let changed = 0;
     for (const item of items){
-      const title = itemTitleInCart(item);
-      const row = INDEX.get(norm(ALIAS[title] || title)); if (!row) continue;
-      const want = ( row[labelToCol(itemExpirationLabel(item))] ?? row.p9 );
+      const title = itemTitle(item);
+      let want = PRICE_HINTS.get(title);
+
+      if (want == null){
+        const row = resolveRow({ // fake “card” just to reuse matcher
+          querySelector: (sel) => sel ? null : null,
+          get textContent(){ return title; }
+        }) || null;
+        if (row){
+          const label = itemExpiry(item);
+          want = ( row[labelToCol(label)] ?? row.p9 );
+        }
+      }
       if (want == null) continue;
-      firstDollarNodes(item).forEach(node => {
-        if (node.textContent.trim() !== fmt(want)){
-          node.textContent = fmt(want);
+
+      dollarNodes(item).forEach(n => {
+        if (n.textContent.trim() !== fmt(want)){
+          n.textContent = fmt(want);
           changed++;
         }
       });
     }
-    if (changed) console.log('[ps-sync v7.4] cart updated $ nodes:', changed);
+    if (changed) console.log('[ps-sync v7.5] cart updated $ nodes:', changed);
   }
 
   document.addEventListener('click', e => {
@@ -459,7 +480,7 @@
     }
   });
 
-  // ---------- CSV load ----------
+  // ---------- main ----------
   function tinyParseCSV(txt){
     const lines = txt.split(/\r?\n/).filter(Boolean);
     const hdr = (lines.shift() || '').split(',').map(h=>h.trim());
@@ -470,33 +491,45 @@
     });
   }
 
+  function applyAll(tag=''){
+    const cards = findCards();
+    let rew=0, upd=0, miss=[];
+    for (const c of cards){
+      const row = resolveRow(c);
+      if (!row){ miss.push((nameEl(c)?.textContent||'').trim()); continue; }
+      rew += rewriteOptions(c, row);
+      if (syncCard(c, row)) upd++;
+    }
+    console.log(`[ps-sync v7.5] cards:${cards.length} optionsRewritten:${rew} greenUpdated:${upd}` + (tag?` (${tag})`:``));
+    if (miss.length) console.warn('[ps-sync v7.5] titles NOT matched (add ALIAS if needed):', miss);
+  }
+
   function start(){
-    const run = rows => { INDEX = buildIndex(rows); applyToAllCards('initial'); setTimeout(()=>applyToAllCards('recheck'),350); };
+    const run = rows => { INDEX = buildIndex(rows); applyAll('initial'); setTimeout(()=>applyAll('recheck'), 400); };
 
     if (window.Papa){
       Papa.parse(CSV_URL + '&cb=' + Date.now(), {
         download:true, header:true, skipEmptyLines:true,
         complete: res => run(res.data),
-        error: e => console.error('[ps-sync v7.4] CSV load error', e),
+        error: e => console.error('[ps-sync v7.5] CSV load error', e),
       });
     } else {
       fetch(CSV_URL + '&cb=' + Date.now())
         .then(r => r.ok ? r.text() : Promise.reject(r.status))
         .then(t => run(tinyParseCSV(t)))
-        .catch(e => console.error('[ps-sync v7.4] CSV fetch error', e));
+        .catch(e => console.error('[ps-sync v7.5] CSV fetch error', e));
     }
   }
 
   setTimeout(start, 400);
 
-  // Re-apply on SPA mutations
-  const mo = new MutationObserver(() => { clearTimeout(mo.t); mo.t = setTimeout(()=>applyToAllCards('mutation'), 120); });
+  const mo = new MutationObserver(() => { clearTimeout(mo.t); mo.t = setTimeout(()=>applyAll('mutation'), 140); });
   mo.observe(document.body, { childList:true, subtree:true });
 
-  // console helper
-  window.__PS_FORCE__ = () => applyToAllCards('manual');
+  window.__PS_FORCE__ = () => applyAll('manual');
 })();
 </script>
+
 
 
 
