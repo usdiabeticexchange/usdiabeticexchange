@@ -10,296 +10,427 @@
 
 <body>
   <div id="root"></div>
+<!-- Price Sync LITE (with logs): updates the green on-card price from Google Sheets -->
 <script>
 (() => {
-  if (window.__PS_V3__) return; window.__PS_V3__ = true;
-  console.log('[ps v3] boot');
+  // Prevent double-run
+  if (window.__PS_LITE__) return; window.__PS_LITE__ = true;
+  console.log('[ps-lite] inline script loaded');
 
-  /* ================== CONFIG ================== */
+  // Your published CSV
   const CSV_URL =
     'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
 
-  // Map any visible title -> sheet name if they differ
+  // Map dropdown text -> sheet columns
+  const EXP_KEYS = [
+    { test: /9\+|\b9\s*months?/i, col: 'p9'  },
+    { test: /\b7\s*[-–]?\s*8|\b7-8/i,        col: 'p78' },
+    { test: /\b6\s*months?/i,               col: 'p6'  }
+  ];
+
+  // Optional name fallbacks if a visible card title differs from sheet name
   const ALIAS = {
-    // 'OneTouch Ultra™ 50 Ct.': 'OneTouch Ultra 50 Ct.',
+    // 'MMT-242': 'MMT 242',
   };
 
-  const labelToCol = (label) =>
-    /\b6\s*months?/i.test(label)              ? 'p6'
-  : /\b7\s*[-–]?\s*8|\b7-8/i.test(label)      ? 'p78'
-  :                                             'p9';
+  // ---------- helpers ----------
+  const norm = s => (s||'')
+    .toLowerCase().replace(/™|®/g,'')
+    .replace(/[^a-z0-9]+/g,' ')
+    .replace(/\s+/g,' ')
+    .trim();
 
-  /* ================== UTILS ================== */
-  const fmt   = n => '$' + Number(n).toFixed(2);
-  const toNum = v => { const n = Number(String(v ?? '').replace(/[^\d.]/g,'')); return Number.isFinite(n) ? n : null; };
-  const norm  = s => (s||'').toLowerCase().replace(/™|®/g,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
-  const baseLabel = txt => String(txt||'').replace(/\s*-\s*\$[\d.,]+$/,'').trim();
+  const toNum = v => {
+    const n = Number(String(v ?? '').replace(/[^\d.]/g,''));
+    return Number.isFinite(n) ? n : null;
+  };
 
-  /* ================== SHEET INDEX ================== */
-  let INDEX = null; // Map<normalizedName, {p9,p78,p6}>
+  const fmt = n => '$' + Number(n).toFixed(2);
 
+  const pickCol = label => {
+    const t = (label||'').toString();
+    for (const k of EXP_KEYS) if (k.test.test(t)) return k.col;
+    return 'p9';
+  };
+
+  function findNameEl(card){
+    return card.querySelector('[data-product-name], .product-name, .card-title, h3, h4, .title');
+  }
+  function findPriceEl(card){
+    const cands = card.querySelectorAll(
+      '[data-price], .price, .product-price, .price-value, .text-success, .text-green-600, .text-green-700, [class*="text-green"]'
+    );
+    for (const el of cands) if (/\$\s*\d/.test((el.textContent||'').trim())) return el;
+    return cands[0] || null;
+  }
+  const findSelect = c => c.querySelector('select');
+
+  function setPriceKeepingStyle(el, value){
+    if (!el) return;
+    el.textContent = fmt(value);
+    try {
+      const cls = el.classList;
+      const hasGreen = Array.from(cls).some(c => c === 'text-success' || c.startsWith('text-green'));
+      if (!hasGreen) cls.add('text-green-600', 'font-semibold');
+    } catch {}
+  }
+
+  function findAllCards(){
+    const btns = [...document.querySelectorAll('button')].filter(b => /add to sale/i.test(b.textContent||''));
+    const cards = [];
+    for (const b of btns){
+      let root = b.closest('[data-product-card], .product-card, .bg-white, .card') || b.parentElement;
+      for (let i=0;i<8 && root;i++){
+        if (findNameEl(root) && (findPriceEl(root) || root.querySelector('[class*="text-green"]'))) break;
+        root = root.parentElement;
+      }
+      if (root && !cards.includes(root)) cards.push(root);
+    }
+    return cards;
+  }
+
+  // ---------- build sheet index ----------
+  let PRICE_INDEX = []; // [{key,tokens,row:{p9,p78,p6}}]
   function buildIndex(rows){
-    const map = new Map();
+    const idx = [];
     for (const r of rows){
       const name = r.product_name || r.Product_Name || r.name || r.Name || r.product || r.Product;
       if (!name) continue;
       const key = norm(name);
-      map.set(key, {
-        p9:  toNum(r['9+ months until expiration'] ?? r['9 months until expiration'] ?? r.price_9plus ?? r['9+'] ?? r['9_plus'] ?? r['9 mo']),
-        p78: toNum(r['7-8 months until expiration'] ?? r.price_7to8 ?? r['7-8'] ?? r['7_to_8'] ?? r['7-8 mo']),
-        p6:  toNum(r['6 months until expiration']   ?? r.price_6     ?? r['6']   ?? r['6 mo']),
+      idx.push({
+        key,
+        tokens: new Set(key.split(' ')),
+        row: {
+          p9:  toNum(r['9+ months until expiration'] ?? r['9 months until expiration'] ?? r.price_9plus ?? r['9+'] ?? r['9_plus'] ?? r['9 mo']),
+          p78: toNum(r['7-8 months until expiration'] ?? r.price_7to8 ?? r['7-8'] ?? r['7_to_8'] ?? r['7-8 mo']),
+          p6:  toNum(r['6 months until expiration']   ?? r.price_6     ?? r['6']   ?? r['6 mo']     ?? r['6_months']),
+        }
       });
     }
-    console.log('[ps v3] sheet rows indexed:', map.size);
-    return map;
+    return idx;
   }
 
-  function resolveRow(visibleTitle){
-    if (!INDEX) return null;
-    const k = norm(ALIAS[visibleTitle] || visibleTitle);
-    if (INDEX.has(k)) return INDEX.get(k);
+  function resolveRow(visibleName){
+    const alias = ALIAS[visibleName] || visibleName;
+    const key = norm(alias);
+    if (!key) return null;
 
-    // fuzzy: token overlap
-    const tokens = k.split(' ').filter(Boolean);
-    let bestKey = null, bestScore = -1;
-    for (const key of INDEX.keys()){
-      let s = 0;
+    const exact = PRICE_INDEX.find(e => e.key === key);
+    if (exact) return exact.row;
+
+    const tokens = key.split(' ').filter(Boolean);
+    let best=null, score=-1;
+    for (const e of PRICE_INDEX){
+      let s=0;
       for (const t of tokens){
-        if (key.includes(t)){ s += 1; if (/^\d+$/.test(t)) s += 0.75; if (t.length>=5) s += 0.25; }
+        if (e.tokens.has(t)){
+          s += 1;
+          if (/^\d+$/.test(t)) s += 0.75;
+          if (t.length >= 5)  s += 0.25;
+        }
       }
-      if (s > bestScore){ bestScore = s; bestKey = key; }
+      if (s>score){ score=s; best=e; }
     }
-    return bestScore >= 2 ? INDEX.get(bestKey) : null;
-  }
-
-  /* ================== CARD DISCOVERY ================== */
-  const looksLikeExpirySelect = (sel) =>
-    !![...sel.options].find(o => /\bmonths?\b.*\buntil\b.*\bexpiration\b/i.test(o.textContent || ''));
-
-  function cardRootFrom(el){
-    let root = el.closest('[data-product-card], .product-card, .bg-white, .card') || el.parentElement;
-    for (let i=0; i<8 && root; i++){
-      const hasTitle = root.querySelector('[data-product-name], .product-name, .card-title, h3, h4, .title');
-      const hasPrice = root.querySelector('[data-price], .price, .product-price, .price-value, .text-success, [class*="text-green"]');
-      if (hasTitle && hasPrice) break;
-      root = root.parentElement;
-    }
-    return root || null;
-  }
-
-  function findCards(){
-    const set = new Set();
-
-    // by <select>
-    document.querySelectorAll('select').forEach(sel => {
-      if (!looksLikeExpirySelect(sel)) return;
-      const root = cardRootFrom(sel);
-      if (root) set.add(root);
-    });
-
-    // fallback by Add to Sale button
-    document.querySelectorAll('button').forEach(b => {
-      if (!/add to sale/i.test(b.textContent || '')) return;
-      const root = cardRootFrom(b);
-      if (root) set.add(root);
-    });
-
-    return [...set];
-  }
-
-  const titleEl = c => c.querySelector('[data-product-name], .product-name, .card-title, h3, h4, .title');
-  const priceEl = c => {
-    const els = c.querySelectorAll('[data-price], .price, .product-price, .price-value, .text-success, .text-green-600, .text-green-700, [class*="text-green"]');
-    for (const el of els) if (/\$\s*\d/.test((el.textContent||'').trim())) return el;
-    return els[0] || null;
-  };
-
-  /* ================== CARD UPDATES ================== */
-  function setGreen(el, val){
-    if (!el || val == null) return false;
-    const before = el.textContent.trim();
-    el.textContent = fmt(val);
-    try {
-      const cls = el.classList;
-      const hasGreen = [...cls].some(c => c === 'text-success' || c.startsWith('text-green'));
-      if (!hasGreen) cls.add('text-green-600','font-semibold');
-    } catch {}
-    return before !== el.textContent.trim();
-  }
-
-  function rewriteOptions(card, row){
-    const sel = card.querySelector('select'); if (!sel) return 0;
-    let changed = 0;
-    for (const opt of sel.options){
-      const base = baseLabel(opt.textContent);
-      const col  = labelToCol(base);
-      const val  = row[col] ?? row.p9;
-      if (val == null) continue;
-      opt.dataset.psPrice = String(val);
-      const next = `${base} - ${fmt(val)}`;
-      if (opt.textContent !== next){ opt.textContent = next; changed++; }
-    }
-    return changed;
-  }
-
-  function selectedPrice(card, row){
-    const sel = card.querySelector('select'); if (!sel) return null;
-    const opt = sel.options[sel.selectedIndex];
-    const stored = toNum(opt?.dataset?.psPrice);
-    if (stored != null) return stored; // use our stored price if present
-    const base = baseLabel(opt?.textContent || '');
-    const col  = labelToCol(base);
-    return row[col] ?? row.p9 ?? null;
+    return score >= 2 ? best.row : null;
   }
 
   function applyToCard(card){
-    const title = (titleEl(card)?.textContent || '').trim();
-    const row = resolveRow(title);
-    if (!row) return { changed:false, opts:0, missing:title };
+    const nameEl  = findNameEl(card);
+    const priceEl = findPriceEl(card);
+    if (!nameEl || !priceEl) return false;
 
-    const opts = rewriteOptions(card, row);
-    const price = selectedPrice(card, row);
-    const changed = setGreen(priceEl(card), price);
+    const sel = findSelect(card);
+    const label = sel?.options?.[sel.selectedIndex]?.textContent || '9+ months until expiration';
 
-    // keep green price in sync with dropdown change
-    const sel = card.querySelector('select');
-    if (sel && !sel.dataset.psBound){
-      sel.addEventListener('change', () => {
-        const r = resolveRow((titleEl(card)?.textContent || '').trim()) || row;
-        setGreen(priceEl(card), selectedPrice(card, r));
+    const row = resolveRow((nameEl.textContent||'').trim());
+    if (!row) return false;
+
+    const col = pickCol(label);
+    const val = row[col] ?? row.p9;
+    if (val == null) return false;
+
+    // prevent redundant writes
+    const key = (row.key || nameEl.textContent || '') + '|' + col + '|' + val;
+    if (card.dataset.psLiteKey === key) return false;
+
+    setPriceKeepingStyle(priceEl, val);
+    card.dataset.psLiteKey = key;
+    return true;
+  }
+
+  // Throttled apply
+  let pending = false;
+  function applyAllThrottled(tag=''){
+    if (pending) return;
+    pending = true;
+    setTimeout(() => {
+      pending = false;
+      const cards = findAllCards();
+      let changed = 0;
+      for (const c of cards) if (applyToCard(c)) changed++;
+      console.log(`[ps-lite] applied to ${cards.length} cards; changed ${changed} prices` + (tag?` (${tag})`:''));      
+    }, 120);
+  }
+
+  function startSync(){
+    // Wait for cards, then fetch CSV
+    let tries=0, max=40;
+    (function waitForCards(){
+      const count = findAllCards().length;
+      if (count){
+        console.log('[ps-lite] cards detected:', count, '— starting CSV load');
+        Papa.parse(CSV_URL + '&cb=' + Date.now(), {
+          download:true, header:true, skipEmptyLines:true,
+          complete: res => {
+            PRICE_INDEX = buildIndex(res.data);
+            console.log('[ps-lite] sheet rows parsed:', res.data.length);
+            applyAllThrottled('initial');
+            // Observe a bit for SPA updates
+            const root = document.querySelector('#root') || document.body;
+            let passes=0; const mo = new MutationObserver(() => {
+              applyAllThrottled('mutation');
+              if (++passes > 15) { mo.disconnect(); console.log('[ps-lite] observer disconnected'); }
+            });
+            mo.observe(root, { childList:true, subtree:true });
+          },
+          error: err => console.error('[ps-lite] CSV load error', err),
+        });
+      } else if (++tries < max){
+        setTimeout(waitForCards, 250);
+      } else {
+        console.warn('[ps-lite] no cards detected — giving up');
+      }
+    })();
+  }
+
+  // Load PapaParse then start
+  if (typeof Papa === 'undefined'){
+    const s=document.createElement('script');
+    s.src='https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js';
+    s.onload=startSync;
+    s.onerror=()=>console.error('[ps-lite] Failed to load PapaParse');
+    document.head.appendChild(s);
+  } else {
+    startSync();
+  }
+})();
+</script>
+
+<script>
+(() => {
+  if (window.__PS_ADDON__) return; window.__PS_ADDON__ = true;
+  console.log('[ps-addon] loaded');
+
+  // --- CONFIG: your published CSV (same as ps-lite) ---
+  const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
+
+  // Map dropdown label -> sheet column
+  const pickCol = (label) => {
+    const t = String(label || '');
+    if (/\b6\s*months?/i.test(t)) return 'p6';
+    if (/\b7\s*[-–]?\s*8|\b7-8/i.test(t)) return 'p78';
+    return 'p9';
+  };
+
+  const fmt   = (n) => '$' + Number(n).toFixed(2);
+  const toNum = (v) => {
+    const n = Number(String(v ?? '').replace(/[^\d.]/g, ''));
+    return Number.isFinite(n) ? n : null;
+  };
+  const norm  = (s) => (s||'').toLowerCase()
+      .replace(/™|®/g,'')
+      .replace(/[^a-z0-9]+/g,' ')
+      .replace(/\s+/g,' ')
+      .trim();
+
+  const stripTrailingPrice = (txt) => String(txt||'').replace(/\s*-\s*\$[\d.,]+$/, '').trim();
+
+  // Optional renames if a card title differs a lot from the sheet
+  const ALIAS = {
+    // 'OneTouch Ultra 50 Ct.': 'OneTouch Ultra 50 Ct.',
+  };
+
+  let INDEX = null;
+
+  function buildIndex(rows){
+    const out = new Map();
+    for (const r of rows){
+      const name = r.product_name || r.Product_Name || r.name || r.Name || r.product || r.Product;
+      if (!name) continue;
+      const key = norm(name);
+      out.set(key, {
+        p9:  toNum(r['9+ months until expiration'] ?? r['9 months until expiration'] ?? r.price_9plus ?? r['9+'] ?? r['9_plus'] ?? r['9 mo']),
+        p78: toNum(r['7-8 months until expiration'] ?? r.price_7to8 ?? r['7-8'] ?? r['7_to_8'] ?? r['7-8 mo']),
+        p6:  toNum(r['6 months until expiration']   ?? r.price_6   ?? r['6']   ?? r['6 mo']),
       });
-      sel.dataset.psBound = '1';
     }
-    return { changed, opts, missing:null };
+    return out;
   }
 
-  function applyAll(){
+  function resolveRowByName(name){
+    if (!INDEX) return null;
+    const alias = ALIAS[name] || name;
+    const key = norm(alias);
+    if (!key) return null;
+
+    // Exact
+    if (INDEX.has(key)) return INDEX.get(key);
+
+    // Fuzzy (token overlap)
+    const tokens = key.split(' ').filter(Boolean);
+    let best=null, score=-1;
+    for (const [k,row] of INDEX){
+      let s=0;
+      for (const t of tokens){
+        if (k.includes(t)) {
+          s += 1;
+          if (/^\d+$/.test(t)) s+=0.75;
+          if (t.length>=5)    s+=0.25;
+        }
+      }
+      if (s>score){score=s; best=row;}
+    }
+    return score>=2 ? best : null;
+  }
+
+  // ---------- Update dropdown option labels on each product card ----------
+  function findCardNameEl(card){
+    return card.querySelector('[data-product-name], .product-name, .card-title, h3, h4, .title');
+  }
+  function rewriteOptionsForCard(card){
     if (!INDEX) return;
-    const cards = findCards();
-    let green = 0, options = 0, missing = [];
-    for (const c of cards){
-      const res = applyToCard(c);
-      green   += res.changed ? 1 : 0;
-      options += res.opts    || 0;
-      if (res.missing) missing.push(res.missing);
+    const nameEl = findCardNameEl(card);
+    if (!nameEl) return;
+
+    const row = resolveRowByName((nameEl.textContent||'').trim());
+    if (!row) return;
+
+    const sel = card.querySelector('select');
+    if (!sel) return;
+
+    for (const opt of sel.options){
+      const base = stripTrailingPrice(opt.textContent);
+      const col  = pickCol(base);
+      const val  = row[col] ?? row.p9;
+      if (val != null) opt.textContent = `${base} - ${fmt(val)}`;
     }
-    console.log('[ps v3] cards:', cards.length, '| options updated:', options, '| green updated:', green);
-    if (missing.length) console.warn('[ps v3] add ALIAS for:', [...new Set(missing)]);
   }
 
-  /* ================== CART SYNC ================== */
-  const cartRoot = () =>
-    document.querySelector('[role="dialog"], [aria-modal="true"], [class*="drawer"], [data-cart], .cart');
+  function scanCardsForOptions(){
+    const cards = document.querySelectorAll('[data-product-card], .product-card, .bg-white, .card');
+    cards.forEach(rewriteOptionsForCard);
+  }
 
-  const dollarNodes = scope =>
-    [...scope.querySelectorAll('*')].filter(n => /\$\s*\d/.test((n.textContent||'').trim()));
-
-  function itemBlocks(){
-    const root = cartRoot(); if (!root) return [];
-    return [...root.querySelectorAll('*')]
-      .filter(n => /^Expiration:/i.test((n.textContent||'').trim()))
+  // ---------- Sync cart / drawer prices ----------
+  function findCartRoot(){
+    return document.querySelector('[role="dialog"], [aria-modal="true"], [class*="drawer"], [data-cart], .cart');
+  }
+  function findCartItems(root){
+    // Rows that contain a line beginning with "Expiration:"
+    return [...root.querySelectorAll('*')].filter(n => /^Expiration:/i.test((n.textContent||'').trim()))
       .map(n => n.closest('*')).filter(Boolean);
   }
-  const itemTitle = el =>
-    (el.querySelector('h1,h2,h3,h4,.title,.font-medium,[data-product-name]')?.textContent || el.textContent || '').trim();
-
-  function itemLabel(el){
-    const m = [...el.querySelectorAll('*')].find(n => /^Expiration:/i.test((n.textContent||'').trim()));
-    const txt = (m?.textContent || '').split(':').slice(1).join(':').trim();
-    if (/9\+/.test(txt))                   return '9+ months until expiration';
-    if (/7\s*[-–]?\s*8/.test(txt))         return '7-8 months until expiration';
-    if (/\b6\b/.test(txt))                 return '6 months until expiration';
-    return '9+ months until expiration';
-  }
-  function itemQty(el){
-    const n = [...el.querySelectorAll('input, span, div')].find(n => /^\d+$/.test((n.value ?? n.textContent ?? '').trim()));
-    const q = Number((n?.value ?? n?.textContent ?? '1').trim());
-    return Number.isFinite(q) && q>0 ? q : 1;
+  function textPriceNodes(scope){
+    return [...scope.querySelectorAll('*')].filter(n => /\$\s*\d/.test(n.textContent||''));
   }
 
-  function syncCart(){
+  function syncCartOnce(){
     if (!INDEX) return;
-    const root = cartRoot(); if (!root) return;
-    const items = itemBlocks(); if (!items.length) return;
+    const root = findCartRoot(); if (!root) return;
+    let changed = 0;
 
-    let touched = 0, total = 0;
-    for (const it of items){
-      const row = resolveRow(itemTitle(it)); if (!row) continue;
-      const want = (row[labelToCol(itemLabel(it))] ?? row.p9); if (want == null) continue;
+    const items = findCartItems(root);
+    for (const item of items){
+      const nameEl = item.querySelector('h1,h2,h3,h4,.title,.font-medium,[data-product-name]') || item;
+      const name   = (nameEl.textContent||'').trim();
 
-      for (const d of dollarNodes(it)) d.textContent = fmt(want); // set unit price everywhere in the item
-      total += want * itemQty(it);
-      touched++;
+      const expLine = [...item.querySelectorAll('*')].find(n => /^Expiration:/i.test((n.textContent||'').trim()));
+      const expLabel = expLine ? expLine.textContent.split(':').slice(1).join(':').trim() : '9+ months until expiration';
+
+      const row = resolveRowByName(name);
+      if (!row) continue;
+
+      const col = pickCol(expLabel);
+      const val = row[col] ?? row.p9; if (val == null) continue;
+
+      const priceNode = textPriceNodes(item)[0];
+      if (priceNode && priceNode.textContent.trim() !== fmt(val)){
+        priceNode.textContent = fmt(val);
+        changed++;
+      }
     }
-    // update total
-    const all$ = dollarNodes(root);
-    const totals = all$.filter(s => /total\b/i.test(s.closest('*')?.textContent || ''));
-    (totals.length ? totals : [all$[all$.length-1]]).forEach(n => n.textContent = fmt(total));
 
-    if (touched) console.log('[ps v3] cart items synced:', touched, 'total:', fmt(total));
+    if (changed) console.log('[ps-addon] cart updated items:', changed);
+
+    // Optional: refresh an obvious "Total value: $…" banner outside the drawer
+    const totals = [...document.querySelectorAll('*')].filter(n => /Total value:/i.test(n.textContent||''));
+    if (totals.length){
+      const dollars = textPriceNodes(root).map(n => Number(n.textContent.replace(/[^0-9.]/g,''))).filter(n => Number.isFinite(n));
+      if (dollars.length){
+        const sum = dollars.reduce((a,b)=>a+b,0);
+        totals.forEach(n => n.textContent = n.textContent.replace(/\$\s*[\d.,]+/, fmt(sum)));
+      }
+    }
   }
 
-  /* ================== CSV LOAD ================== */
-  function parseCSV(txt){
-    const lines = txt.split(/\r?\n/);
-    if (!lines.length) return [];
-    const hdr = (lines.shift()||'').split(',').map(h=>h.trim());
-    return lines.filter(Boolean).map(line => {
-      // your sheet has no quoted commas, so a simple split is OK
+  // ---------- Load CSV (Papa if available; otherwise light fallback) ----------
+  function hydrate(rows){
+    INDEX = buildIndex(rows);
+    scanCardsForOptions();
+    syncCartOnce();
+  }
+
+  function parseCSVText(txt){
+    const lines = txt.split(/\r?\n/).filter(Boolean);
+    const hdr = (lines.shift() || '').split(',').map(h=>h.trim());
+    return lines.map(line => {
       const cols = line.split(',');
-      const o = {}; hdr.forEach((h,i)=> o[h] = (cols[i] ?? '').trim());
+      const o = {};
+      hdr.forEach((h,i)=> o[h] = (cols[i] ?? '').trim());
       return o;
     });
   }
 
   function loadSheet(){
-    return fetch(CSV_URL + '&cb=' + Date.now())
-      .then(r => r.ok ? r.text() : Promise.reject(r.status))
-      .then(t => { INDEX = buildIndex(parseCSV(t)); });
+    if (window.Papa) {
+      Papa.parse(CSV_URL + '&cb=' + Date.now(), {
+        download:true, header:true, skipEmptyLines:true,
+        complete: res => hydrate(res.data),
+        error: err => console.error('[ps-addon] CSV load error', err),
+      });
+    } else {
+      fetch(CSV_URL + '&cb=' + Date.now())
+        .then(r => r.ok ? r.text() : Promise.reject(r.status))
+        .then(t => hydrate(parseCSVText(t)))
+        .catch(e => console.error('[ps-addon] CSV fetch error', e));
+    }
   }
 
-  /* ================== BOOT ================== */
-  (async function init(){
-    // wait until at least 1 card-select is in DOM
-    let tries=0;
-    await new Promise(resolve => {
-      (function w(){
-        if (findCards().length) return resolve();
-        if (++tries > 60) return resolve();
-        setTimeout(w, 150);
-      })();
-    });
+  // First run (give ps-lite a moment to render)
+  setTimeout(() => { loadSheet(); }, 300);
 
-    await loadSheet();
-    applyAll();
-    syncCart();
-  })();
-
-  // keep things fresh for SPA updates
-  const root = document.querySelector('#root') || document.body;
+  // Re-run on DOM changes (drawer open, tab switch, SPA navigation, etc.)
   const mo = new MutationObserver(() => {
-    clearTimeout(mo.t1); clearTimeout(mo.t2);
-    mo.t1 = setTimeout(applyAll, 120);
-    mo.t2 = setTimeout(syncCart, 250);
+    clearTimeout(mo.tid);
+    mo.tid = setTimeout(() => {
+      scanCardsForOptions();
+      syncCartOnce();
+    }, 120);
   });
-  mo.observe(root, { childList:true, subtree:true });
+  mo.observe(document.body, { childList:true, subtree:true });
 
-  // re-sync after adds and qty +/- clicks
-  document.addEventListener('click', e => {
-    const b = e.target.closest('button');
-    if (!b) return;
-    const txt = (b.textContent||'').trim();
-    if (/add to sale/i.test(txt) || /^[+-]$/.test(txt)) {
-      setTimeout(syncCart, 250);
-      setTimeout(syncCart, 700);
+  // Also re-sync after "Add to Sale" clicks
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (btn && /add to sale/i.test(btn.textContent || '')) {
+      setTimeout(syncCartOnce, 200);
     }
   });
 
-  // quick console helper
-  window.__PS_STATUS__ = () => ({ cards: findCards().length, indexed: INDEX?.size });
+  // Small helper you can run in Console to force a cart refresh:
+  window.__PS_ADDON_SYNC__ = () => { scanCardsForOptions(); syncCartOnce(); console.log('[ps-addon] manual sync'); };
 })();
 </script>
-
 
 
 </body>
