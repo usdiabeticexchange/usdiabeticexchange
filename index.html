@@ -218,8 +218,8 @@
 
 <script>
 (() => {
-  if (window.__PS_SYNC_V73__) return; window.__PS_SYNC_V73__ = true;
-  console.log('[ps-sync v7.3] init');
+  if (window.__PS_SYNC_V74__) return; window.__PS_SYNC_V74__ = true;
+  console.log('[ps-sync v7.4] init');
 
   const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
 
@@ -234,14 +234,16 @@
     : /\b7\s*[-–]?\s*8|\b7-8/i.test(label) ? 'p78'
     : 'p9';
 
-  // Fix trailing-dot case from your logs
+  // quick filters for non-product tiles
+  const looksLikeNoise = t => /don.?t see|your product|text us|meters|lancets|medtronic/i.test(t);
+
+  // minor alias nits
   const ALIAS = {
     'OneTouch Ultra 50 Ct.' : 'OneTouch Ultra 50 Ct',
   };
 
   // ---------- sheet index ----------
   let INDEX = null; // Map<normalizedName, {p9,p78,p6}>
-
   function buildIndex(rows){
     const map = new Map();
     for (const r of rows){
@@ -254,7 +256,7 @@
         p6 : toNum(r['6 months until expiration']   ?? r.price_6     ?? r['6']   ?? r['6 mo']),
       });
     }
-    console.log('[ps-sync v7.3] sheet rows indexed:', map.size);
+    console.log('[ps-sync v7.4] sheet rows indexed:', map.size);
     return map;
   }
 
@@ -266,50 +268,61 @@
     return cands[0] || null;
   };
 
+  function addCandidateRoot(set, node){
+    let r = node.closest('[data-product-card], .product-card, .bg-white, .card') || node.parentElement;
+    for (let i=0; i<8 && r; i++){
+      if (getNameEl(r) && (getPriceEl(r) || r.querySelector('select'))) break;
+      r = r.parentElement;
+    }
+    if (r) set.add(r);
+  }
+
   function findCards(){
     const roots = new Set();
-
-    const addRoot = (node) => {
-      let r = node.closest('[data-product-card], .product-card, .bg-white, .card') || node.parentElement;
-      for (let i=0; i<8 && r; i++){
-        if (getNameEl(r) && (getPriceEl(r) || r.querySelector('select'))) break;
-        r = r.parentElement;
-      }
-      if (r) roots.add(r);
-    };
-
     const btns = [...document.querySelectorAll('button')].filter(b => /add to sale/i.test(b.textContent||''));
-    btns.forEach(addRoot);
-
     const sels = [...document.querySelectorAll('select')];
-    sels.forEach(addRoot);
-
     const greens = [...document.querySelectorAll('[data-price], .price, .product-price, .price-value, .text-success, .text-green-600, .text-green-700, [class*="text-green"]')];
-    greens.forEach(addRoot);
 
-    console.log('[ps-sync v7.3] probe  buttons=' + btns.length + '  selects=' + sels.length + '  greens=' + greens.length + '  -> cards=' + roots.size);
-    return [...roots];
+    btns.forEach(n=>addCandidateRoot(roots,n));
+    sels.forEach(n=>addCandidateRoot(roots,n));
+    greens.forEach(n=>addCandidateRoot(roots,n));
+
+    // final pass: drop obvious non-products
+    const cards = [...roots].filter(r => {
+      const title = (getNameEl(r)?.textContent || '').trim();
+      return title && !looksLikeNoise(title);
+    });
+
+    console.log('[ps-sync v7.4] probe  buttons=' + btns.length + '  selects=' + sels.length + '  greens=' + greens.length + '  -> cards=' + cards.length);
+    return cards;
   }
 
   function resolveRowByCard(card){
     if (!INDEX) return null;
     const raw = (getNameEl(card)?.textContent || '').trim();
+    if (!raw || looksLikeNoise(raw)) return null;
     const alias = ALIAS[raw] || raw;
     const key = norm(alias);
+
     if (INDEX.has(key)) return INDEX.get(key);
 
-    // fuzzy fallback
-    let best=null, score=-1;
+    // more forgiving fuzzy: accept best match if it shares any significant token
     const toks = key.split(/\s+/).filter(Boolean);
+    let best=null, score=-1;
     for (const [k,v] of INDEX){
       let s=0;
-      toks.forEach(t => { if (k.includes(t)) s += ( /^\d+$/.test(t)?1.75 : t.length>=5?1.25:1 ); });
+      for (const t of toks){
+        if (k.includes(t)){
+          s += ( /^\d+$/.test(t) ? 1.5 : t.length>=5 ? 1.1 : 0.9 );
+        }
+      }
       if (s>score){ score=s; best=v; }
     }
-    return score>=2 ? best : null;
+    // accept if we matched at least ~one solid token
+    return score >= 1 ? best : null;
   }
 
-  // ---------- write helpers ----------
+  // ---------- writers ----------
   function setGreenPrice(el, num){
     if (!el) return;
     el.textContent = fmt(num);
@@ -321,7 +334,6 @@
   }
 
   function stampPriceTargets(card, price){
-    // Buttons & common data-* attrs
     card.querySelectorAll('button').forEach(btn=>{
       ['data-price','data-amount','data-value'].forEach(a => btn.setAttribute(a, String(price)));
       btn.dataset.price = String(price);
@@ -330,7 +342,6 @@
       ['data-price','data-amount','data-value'].forEach(a => n.setAttribute(a, String(price)));
       n.dataset.price = String(price);
     });
-    // Hidden inputs that look like price fields
     card.querySelectorAll('input[type="hidden"]').forEach(h=>{
       const idc = (h.id||'') + ' ' + (h.name||'') + ' ' + (h.className||'');
       if (/price|amount|value/i.test(idc)) h.value = String(price);
@@ -348,7 +359,7 @@
       if (val != null){
         const next = `${cat} - ${fmt(val)}`;
         if (opt.textContent !== next) changed++;
-        // Update everything the app might read:
+        // Update every attribute apps commonly read:
         opt.textContent = next;
         opt.label = next;
         opt.text  = next;
@@ -357,6 +368,7 @@
         opt.dataset.price = String(val);
       }
     });
+    // poke the framework
     sel.dispatchEvent(new Event('input',  { bubbles:true }));
     sel.dispatchEvent(new Event('change', { bubbles:true }));
     return changed;
@@ -382,7 +394,6 @@
       if (!row){ missing.push((getNameEl(c)?.textContent||'').trim()); continue; }
       rewrote += rewriteOptions(c, row);
       if (syncCardPrice(c, row)) changed++;
-      // keep selection in sync when user changes it
       const sel = c.querySelector('select');
       if (sel && !sel.dataset.psBound){
         sel.addEventListener('change', () => {
@@ -392,11 +403,11 @@
         sel.dataset.psBound = '1';
       }
     }
-    console.log(`[ps-sync v7.3] cards:${cards.length}  optionsRewritten:${rewrote}  greenUpdated:${changed}` + (tag?` (${tag})`:``));
-    if (missing.length) console.warn('[ps-sync v7.3] titles NOT matched (add ALIAS):', missing);
+    console.log(`[ps-sync v7.4] cards:${cards.length}  optionsRewritten:${rewrote}  greenUpdated:${changed}` + (tag?` (${tag})`:``));
+    if (missing.length) console.warn('[ps-sync v7.4] titles NOT matched (add ALIAS if needed):', missing);
   }
 
-  // ---------- cart ----------
+  // ---------- cart sync ----------
   const cartRoot = () =>
     document.querySelector('[role="dialog"], [aria-modal="true"], [class*="drawer"], [data-cart], .cart');
 
@@ -430,17 +441,14 @@
       const row = INDEX.get(norm(ALIAS[title] || title)); if (!row) continue;
       const want = ( row[labelToCol(itemExpirationLabel(item))] ?? row.p9 );
       if (want == null) continue;
-
-      // Update all $ nodes (unit & total) inside the item
-      const nodes = firstDollarNodes(item);
-      nodes.forEach(node => {
+      firstDollarNodes(item).forEach(node => {
         if (node.textContent.trim() !== fmt(want)){
           node.textContent = fmt(want);
           changed++;
         }
       });
     }
-    if (changed) console.log('[ps-sync v7.3] cart updated $ nodes:', changed);
+    if (changed) console.log('[ps-sync v7.4] cart updated $ nodes:', changed);
   }
 
   document.addEventListener('click', e => {
@@ -469,13 +477,13 @@
       Papa.parse(CSV_URL + '&cb=' + Date.now(), {
         download:true, header:true, skipEmptyLines:true,
         complete: res => run(res.data),
-        error: e => console.error('[ps-sync v7.3] CSV load error', e),
+        error: e => console.error('[ps-sync v7.4] CSV load error', e),
       });
     } else {
       fetch(CSV_URL + '&cb=' + Date.now())
         .then(r => r.ok ? r.text() : Promise.reject(r.status))
         .then(t => run(tinyParseCSV(t)))
-        .catch(e => console.error('[ps-sync v7.3] CSV fetch error', e));
+        .catch(e => console.error('[ps-sync v7.4] CSV fetch error', e));
     }
   }
 
@@ -485,7 +493,7 @@
   const mo = new MutationObserver(() => { clearTimeout(mo.t); mo.t = setTimeout(()=>applyToAllCards('mutation'), 120); });
   mo.observe(document.body, { childList:true, subtree:true });
 
-  // console helpers
+  // console helper
   window.__PS_FORCE__ = () => applyToAllCards('manual');
 })();
 </script>
