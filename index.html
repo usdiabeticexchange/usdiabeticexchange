@@ -218,8 +218,8 @@
 
 <script>
 (() => {
-  if (window.__PS_SYNC_V71__) return; window.__PS_SYNC_V71__ = true;
-  console.log('[ps-sync v7.1] init');
+  if (window.__PS_SYNC_V72__) return; window.__PS_SYNC_V72__ = true;
+  console.log('[ps-sync v7.2] init');
 
   const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv';
 
@@ -234,10 +234,10 @@
     : /\b7\s*[-–]?\s*8|\b7-8/i.test(label) ? 'p78'
     : 'p9';
 
-  // If a visible card title differs from the sheet name, add it here:
+  // Alias map: visible card title -> sheet name
   const ALIAS = {
-    // Example:
-    // 'OneTouch Ultra 50 Ct.' : 'OneTouch Ultra 50 Ct',
+    // Fix trailing dot case you’re seeing in logs:
+    'OneTouch Ultra 50 Ct.' : 'OneTouch Ultra 50 Ct',
   };
 
   // ---------- sheet index ----------
@@ -255,21 +255,27 @@
         p6 : toNum(r['6 months until expiration']   ?? r.price_6     ?? r['6']   ?? r['6 mo']),
       });
     }
-    console.log('[ps-sync v7.1] sheet rows indexed:', map.size);
+    console.log('[ps-sync v7.2] sheet rows indexed:', map.size);
     return map;
   }
 
   // ---------- DOM helpers ----------
-  const addToSaleButtons = () =>
-    [...document.querySelectorAll('button')].filter(b => /add to sale/i.test(b.textContent||''));
+  const getNameEl  = c => c.querySelector('[data-product-name], .product-name, .card-title, h3, h4, .title');
+  const getPriceEl = c => {
+    const cands = c.querySelectorAll('[data-price], .price, .product-price, .price-value, .text-success, .text-green-600, .text-green-700, [class*="text-green"]');
+    for (const el of cands) if (/\$\s*\d/.test((el.textContent||'').trim())) return el;
+    return cands[0] || null;
+  };
 
+  // NEW: find cards by SELECTs so we catch every card reliably
   function findCards(){
-    const btns = addToSaleButtons();
+    const sels = [...document.querySelectorAll('select')];
     const cards = [];
-    for (const b of btns){
-      let root = b.closest('[data-product-card], .product-card, .bg-white, .card') || b.parentElement;
+    for (const sel of sels){
+      let root = sel.closest('[data-product-card], .product-card, .bg-white, .card') || sel.parentElement;
       for (let i=0;i<8 && root;i++){
-        if (getNameEl(root) && root.querySelector('select')) break;
+        // stop when we have both a name and a price holder
+        if (getNameEl(root) && (getPriceEl(root) || root.querySelector('[class*="text-green"]'))) break;
         root = root.parentElement;
       }
       if (root && !cards.includes(root)) cards.push(root);
@@ -277,26 +283,19 @@
     return cards;
   }
 
-  const getNameEl  = c => c.querySelector('[data-product-name], .product-name, .card-title, h3, h4, .title');
-  const getPriceEl = c => {
-    const cands = c.querySelectorAll('[data-price], .price, .product-price, .price-value, .text-success, .text-green-600, .text-green-700, [class*="text-green"]');
-    for (const el of cands) if (/\$\s*\d/.test((el.textContent||'').trim())) return el;
-    return cands[0] || null;
-  };
-  const getSelect  = c => c.querySelector('select');
-
   function resolveRowByCard(card){
     if (!INDEX) return null;
-    const raw  = (getNameEl(card)?.textContent || '').trim();
+    const raw = (getNameEl(card)?.textContent || '').trim();
     const alias = ALIAS[raw] || raw;
     const key = norm(alias);
     if (INDEX.has(key)) return INDEX.get(key);
 
     // fuzzy fallback
     let best=null, score=-1;
+    const toks = key.split(/\s+/).filter(Boolean);
     for (const [k,v] of INDEX){
       let s=0;
-      key.split(/\s+/).forEach(t => { if(k.includes(t)){ s += ( /^\d+$/.test(t)?1.75 : t.length>=5?1.25:1 ); } });
+      toks.forEach(t => { if (k.includes(t)) s += ( /^\d+$/.test(t)?1.75 : t.length>=5?1.25:1 ); });
       if (s>score){ score=s; best=v; }
     }
     return score>=2 ? best : null;
@@ -314,18 +313,17 @@
   }
 
   function stampPriceTargets(card, price){
-    // Add-to-sale button
-    const btn = card.querySelector('button');
-    if (btn){
+    // button & common data-* places
+    const btns = card.querySelectorAll('button');
+    btns.forEach(btn => {
       ['data-price','data-amount','data-value'].forEach(a => btn.setAttribute(a, String(price)));
       btn.dataset.price = String(price);
-    }
-    // Obvious holders
+    });
     card.querySelectorAll('[data-price],[data-amount],[data-value]').forEach(n=>{
       ['data-price','data-amount','data-value'].forEach(a => n.setAttribute(a, String(price)));
       n.dataset.price = String(price);
     });
-    // Hidden inputs that look like price fields
+    // hidden inputs that look like price fields
     card.querySelectorAll('input[type="hidden"]').forEach(h=>{
       const idc = (h.id||'') + ' ' + (h.name||'') + ' ' + (h.className||'');
       if (/price|amount|value/i.test(idc)) h.value = String(price);
@@ -333,7 +331,7 @@
   }
 
   function rewriteOptions(card, row){
-    const sel = getSelect(card); if (!sel) return 0;
+    const sel = card.querySelector('select'); if (!sel) return 0;
     let changed = 0;
     [...sel.options].forEach(opt=>{
       const cat = opt.dataset.psCat || baseLabel(opt.textContent);
@@ -342,8 +340,8 @@
       const val = row[col] ?? row.p9;
       if (val != null){
         const next = `${cat} - ${fmt(val)}`;
-        if (opt.textContent !== next){ changed++; }
-        // Write everywhere
+        if (opt.textContent !== next) changed++;
+        // Write everywhere the app might read:
         opt.textContent = next;
         opt.label = next;
         opt.text  = next;
@@ -352,14 +350,14 @@
         opt.dataset.price = String(val);
       }
     });
-    // Nudge frameworks to pick up changes
+    // Nudge frameworks to pick up the changes
     sel.dispatchEvent(new Event('input',  { bubbles:true }));
     sel.dispatchEvent(new Event('change', { bubbles:true }));
     return changed;
   }
 
   function syncCardPrice(card, row){
-    const sel = getSelect(card), gre = getPriceEl(card);
+    const sel = card.querySelector('select'), gre = getPriceEl(card);
     if (!sel || !gre) return false;
     const opt = sel.selectedOptions[0] || sel.options[sel.selectedIndex];
     const cat = (opt?.dataset.psCat) || baseLabel(opt?.textContent || '9+ months');
@@ -379,16 +377,17 @@
       rewrote += rewriteOptions(c, row);
       if (syncCardPrice(c, row)) changed++;
     }
-    console.log(`[ps-sync v7.1] cards:${cards.length}  optionsRewritten:${rewrote}  greenUpdated:${changed}` + (tag?` (${tag})`:``));
-    if (missing.length) console.warn('[ps-sync v7.1] titles NOT matched (add ALIAS):', missing);
+    console.log(`[ps-sync v7.2] cards:${cards.length}  optionsRewritten:${rewrote}  greenUpdated:${changed}` + (tag?` (${tag})`:``));
+    if (missing.length) console.warn('[ps-sync v7.2] titles NOT matched (add ALIAS):', missing);
   }
 
   // ---------- cart ----------
   const cartRoot = () =>
     document.querySelector('[role="dialog"], [aria-modal="true"], [class*="drawer"], [data-cart], .cart');
 
-  const firstDollarNode = scope =>
-    [...scope.querySelectorAll('*')].find(n => /\$\s*\d/.test((n.textContent||'').trim()));
+  function firstDollarNodes(scope){
+    return [...scope.querySelectorAll('*')].filter(n => /\$\s*\d/.test((n.textContent||'').trim()));
+  }
 
   function itemTitleInCart(item){
     const t = item.querySelector('h1,h2,h3,h4,.title,.font-medium,[data-product-name]');
@@ -417,13 +416,16 @@
       const want = ( row[labelToCol(itemExpirationLabel(item))] ?? row.p9 );
       if (want == null) continue;
 
-      const node = firstDollarNode(item);
-      if (node && node.textContent.trim() !== fmt(want)){
-        node.textContent = fmt(want);
-        changed++;
-      }
+      // Update ALL $ nodes inside this item (per-unit and total)
+      const nodes = firstDollarNodes(item);
+      nodes.forEach(node => {
+        if (node.textContent.trim() !== fmt(want)){
+          node.textContent = fmt(want);
+          changed++;
+        }
+      });
     }
-    if (changed) console.log('[ps-sync v7.1] cart updated items:', changed);
+    if (changed) console.log('[ps-sync v7.2] cart updated $ nodes:', changed);
   }
 
   document.addEventListener('click', e => {
@@ -446,19 +448,19 @@
   }
 
   function start(){
-    const run = rows => { INDEX = buildIndex(rows); applyToAllCards('initial'); setTimeout(()=>applyToAllCards('recheck'),300); };
+    const run = rows => { INDEX = buildIndex(rows); applyToAllCards('initial'); setTimeout(()=>applyToAllCards('recheck'),350); };
 
     if (window.Papa){
       Papa.parse(CSV_URL + '&cb=' + Date.now(), {
         download:true, header:true, skipEmptyLines:true,
         complete: res => run(res.data),
-        error: e => console.error('[ps-sync v7.1] CSV load error', e),
+        error: e => console.error('[ps-sync v7.2] CSV load error', e),
       });
     } else {
       fetch(CSV_URL + '&cb=' + Date.now())
         .then(r => r.ok ? r.text() : Promise.reject(r.status))
         .then(t => run(tinyParseCSV(t)))
-        .catch(e => console.error('[ps-sync v7.1] CSV fetch error', e));
+        .catch(e => console.error('[ps-sync v7.2] CSV fetch error', e));
     }
   }
 
@@ -468,12 +470,12 @@
   const mo = new MutationObserver(() => { clearTimeout(mo.t); mo.t = setTimeout(()=>applyToAllCards('mutation'), 120); });
   mo.observe(document.body, { childList:true, subtree:true });
 
-  // small console helpers
+  // console helpers
+  window.__PS_FORCE__ = () => applyToAllCards('manual');
   window.__PS_DEBUG__ = () => findCards().slice(0,5).map(c=>({
     title:(getNameEl(c)?.textContent||'').trim(),
     matched: !!resolveRowByCard(c)
   }));
-  window.__PS_FORCE__ = () => applyToAllCards('manual');
 })();
 </script>
 
