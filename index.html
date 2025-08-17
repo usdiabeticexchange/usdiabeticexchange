@@ -11,24 +11,24 @@
 <body>
   <div id="root"></div>
 
-<!-- Google Sheets Price Sync - Optimized Version -->
+<!-- Enhanced Google Sheets Integration - Fixed Cart & Dropdown Sync -->
 <script>
 (() => {
   // Prevent multiple runs
-  if (window.PRICE_SYNC_LOADED) return;
-  window.PRICE_SYNC_LOADED = true;
+  if (window.ENHANCED_SHEETS_SYNC) return;
+  window.ENHANCED_SHEETS_SYNC = true;
 
-  console.log('[PriceSync] Starting Google Sheets integration...');
+  console.log('🚀 [SheetsSync] Enhanced Google Sheets integration starting...');
 
   // Configuration
   const CONFIG = {
     CSV_URL: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv',
-    UPDATE_INTERVAL: 300000, // 5 minutes
+    UPDATE_INTERVAL: 60000, // 1 minute for faster updates
     MAX_RETRIES: 3
   };
 
   // State
-  let priceData = new Map();
+  let productData = new Map();
   let isLoading = false;
   let retryCount = 0;
 
@@ -41,9 +41,13 @@
       .trim();
   };
 
+  const parsePrice = (priceStr) => {
+    const num = Number(String(priceStr).replace(/[^0-9.]/g, ''));
+    return isNaN(num) ? 0 : num;
+  };
+
   const formatPrice = (price) => {
-    const num = Number(String(price).replace(/[^0-9.]/g, ''));
-    return isNaN(num) ? null : `$${num.toFixed(2)}`;
+    return `${Number(price).toFixed(2)}`;
   };
 
   const parseExpirationCategory = (text) => {
@@ -54,8 +58,9 @@
     return '9+';
   };
 
-  // Find product cards and elements
+  // Enhanced product finder
   const findProductCards = () => {
+    // Look for cards with Add to Sale buttons
     const buttons = [...document.querySelectorAll('button')]
       .filter(btn => /add to sale/i.test(btn.textContent || ''));
 
@@ -63,8 +68,8 @@
       let card = btn.closest('[data-product-card], .product-card, .bg-white, .card');
       if (!card) {
         card = btn.parentElement;
-        for (let i = 0; i < 5 && card; i++) {
-          if (card.querySelector('h3, h4, .title, [data-product-name]')) break;
+        for (let i = 0; i < 8 && card; i++) {
+          if (card.querySelector('h3, h4, .title, [data-product-name], .product-name')) break;
           card = card.parentElement;
         }
       }
@@ -77,31 +82,39 @@
     const priceEl = card.querySelector('[data-price], .price, .product-price, .text-green-600, .text-green-700, .text-success');
     const selectEl = card.querySelector('select');
 
-    if (!nameEl || !priceEl) return null;
+    if (!nameEl) return null;
 
     const name = nameEl.textContent?.trim() || '';
-    const selectedOption = selectEl?.options[selectEl.selectedIndex];
-    const expiration = selectedOption?.textContent || '9+ months until expiration';
+    const selectedValue = selectEl?.value || selectEl?.options?.[selectEl?.selectedIndex]?.value;
+    let expiration = '9+ months until expiration';
 
-    return { nameEl, priceEl, selectEl, name, expiration, card };
+    if (selectEl?.selectedIndex >= 0) {
+      const selectedOption = selectEl.options[selectEl.selectedIndex];
+      if (selectedOption) {
+        expiration = selectedOption.textContent || selectedOption.value || expiration;
+      }
+    }
+
+    return { nameEl, priceEl, selectEl, name, expiration, selectedValue, card };
   };
 
   // Load and parse CSV data
-  const loadPriceData = async () => {
+  const loadProductData = async () => {
     if (isLoading) return;
     isLoading = true;
 
     try {
-      console.log('[PriceSync] Fetching price data...');
+      console.log('📊 [SheetsSync] Fetching data from Google Sheets...');
       const response = await fetch(`${CONFIG.CSV_URL}&cb=${Date.now()}`);
 
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
       const csvText = await response.text();
       const lines = csvText.split('\n').filter(line => line.trim());
-      const headers = lines[0].split(',').map(h => h.trim());
+      if (lines.length < 2) throw new Error('Invalid CSV data');
 
-      priceData.clear();
+      const headers = lines[0].split(',').map(h => h.trim());
+      productData.clear();
 
       for (let i = 1; i < lines.length; i++) {
         const values = lines[i].split(',').map(v => v.trim());
@@ -114,119 +127,155 @@
         if (!productName) continue;
 
         const normalized = normalizeProductName(productName);
-        priceData.set(normalized, {
-          '6': formatPrice(row['6 months until expiration'] || row['6'] || row['6_months']),
-          '7-8': formatPrice(row['7-8 months until expiration'] || row['7-8'] || row['7_to_8']),
-          '9+': formatPrice(row['9+ months until expiration'] || row['9+'] || row['9_plus'])
-        });
+        const prices = {
+          '6': parsePrice(row['6 months until expiration'] || row['6'] || row['6_months']),
+          '7-8': parsePrice(row['7-8 months until expiration'] || row['7-8'] || row['7_to_8']),
+          '9+': parsePrice(row['9+ months until expiration'] || row['9+'] || row['9_plus'])
+        };
+
+        // Only store products with at least one valid price
+        if (prices['6'] > 0 || prices['7-8'] > 0 || prices['9+'] > 0) {
+          productData.set(normalized, {
+            name: productName.trim(),
+            prices,
+            rawRow: row
+          });
+        }
       }
 
-      console.log(`[PriceSync] Loaded ${priceData.size} products from spreadsheet`);
-      retryCount = 0; // Reset retry count on success
+      console.log(`✅ [SheetsSync] Loaded ${productData.size} products from Google Sheets`);
+      retryCount = 0;
 
     } catch (error) {
-      console.error('[PriceSync] Error loading price data:', error);
+      console.error('❌ [SheetsSync] Error loading data:', error);
       retryCount++;
 
       if (retryCount < CONFIG.MAX_RETRIES) {
-        console.log(`[PriceSync] Retrying in 5 seconds... (${retryCount}/${CONFIG.MAX_RETRIES})`);
-        setTimeout(loadPriceData, 5000);
+        console.log(`🔄 [SheetsSync] Retrying in 5 seconds... (${retryCount}/${CONFIG.MAX_RETRIES})`);
+        setTimeout(loadProductData, 5000);
       }
     } finally {
       isLoading = false;
     }
   };
 
-  // Update product prices
-  const updateProductPrices = () => {
-    if (priceData.size === 0) return;
+  // Update product card with proper value syncing
+  const syncProductCard = (card) => {
+    const info = getProductInfo(card);
+    if (!info) return false;
+
+    const { name, expiration, priceEl, selectEl } = info;
+    const normalizedName = normalizeProductName(name);
+    const expirationCategory = parseExpirationCategory(expiration);
+
+    // Find matching product data
+    let productInfo = productData.get(normalizedName);
+
+    // Fuzzy matching if exact match not found
+    if (!productInfo) {
+      const nameTokens = normalizedName.split(' ').filter(Boolean);
+      let bestMatch = null;
+      let bestScore = 0;
+
+      for (const [key, value] of productData) {
+        let score = 0;
+        nameTokens.forEach(token => {
+          if (key.includes(token) || token.includes(key.split(' ')[0])) {
+            score += token.length > 2 ? 2 : 1;
+          }
+        });
+
+        if (score > bestScore && score > 1) {
+          bestScore = score;
+          bestMatch = value;
+        }
+      }
+
+      productInfo = bestMatch;
+    }
+
+    if (!productInfo) return false;
+
+    const newPrice = productInfo.prices[expirationCategory] || productInfo.prices['9+'];
+    if (newPrice <= 0) return false;
+
+    let updated = false;
+
+    // Update price display
+    if (priceEl) {
+      const currentText = priceEl.textContent?.trim() || '';
+      const newPriceText = formatPrice(newPrice);
+      if (currentText !== newPriceText) {
+        priceEl.textContent = newPriceText;
+        priceEl.dataset.price = String(newPrice);
+        updated = true;
+      }
+    }
+
+    // CRITICAL: Update select dropdown values and text
+    if (selectEl) {
+      for (const option of selectEl.options) {
+        const optionExpiration = parseExpirationCategory(option.textContent);
+        const optionPrice = productInfo.prices[optionExpiration];
+        if (optionPrice > 0) {
+          const baseText = option.textContent.replace(/\s*-\s*\$[\d.]+$/, '').trim();
+          const newOptionText = `${baseText} - ${formatPrice(optionPrice)}`;
+          if (option.textContent !== newOptionText) {
+            option.textContent = newOptionText;
+            option.value = String(optionPrice); // This fixes cart price issues
+            updated = true;
+          }
+        }
+      }
+    }
+
+    // Update all hidden inputs and data attributes for cart functionality
+    const allInputs = card.querySelectorAll('input[type="hidden"], input[name*="price"]');
+    allInputs.forEach(input => {
+      if (input.value !== String(newPrice)) {
+        input.value = String(newPrice);
+        updated = true;
+      }
+    });
+
+    // Update card data attributes
+    if (card.dataset.price !== String(newPrice)) {
+      card.dataset.price = String(newPrice);
+      updated = true;
+    }
+
+    // Trigger change events for React state updates
+    if (updated && selectEl) {
+      selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    return updated;
+  };
+
+  // Sync all product cards
+  const syncAllProducts = () => {
+    if (productData.size === 0) return 0;
 
     const cards = findProductCards();
     let updatedCount = 0;
 
     cards.forEach(card => {
-      const info = getProductInfo(card);
-      if (!info) return;
-
-      const { name, expiration, priceEl, selectEl } = info;
-      const normalizedName = normalizeProductName(name);
-      const expirationCategory = parseExpirationCategory(expiration);
-
-      // Try exact match first
-      let prices = priceData.get(normalizedName);
-
-      // If no exact match, try fuzzy matching
-      if (!prices) {
-        const nameTokens = normalizedName.split(' ').filter(Boolean);
-        let bestMatch = null;
-        let bestScore = 0;
-
-        for (const [key, value] of priceData) {
-          let score = 0;
-          nameTokens.forEach(token => {
-            if (key.includes(token)) {
-              score += token.length > 2 ? 2 : 1;
-            }
-          });
-
-          if (score > bestScore && score > 2) {
-            bestScore = score;
-            bestMatch = value;
-          }
-        }
-
-        prices = bestMatch;
-      }
-
-      if (!prices) return;
-
-      const newPrice = prices[expirationCategory] || prices['9+'];
-      if (!newPrice) return;
-
-      // Update price display
-      const currentPrice = priceEl.textContent?.trim() || '';
-      if (currentPrice !== newPrice) {
-        priceEl.textContent = newPrice;
-        priceEl.dataset.price = newPrice.replace('$', '');
-
-        // Update dropdown options if they exist
-        if (selectEl) {
-          for (const option of selectEl.options) {
-            const optionExpiration = parseExpirationCategory(option.textContent);
-            const optionPrice = prices[optionExpiration] || prices['9+'];
-            if (optionPrice) {
-              const baseText = option.textContent.replace(/\s*-\s*\$[\d.]+$/, '');
-              option.textContent = `${baseText} - ${optionPrice}`;
-              if (option.selected) {
-                option.value = optionPrice.replace('$', '');
-              }
-            }
-          }
-        }
-
-        // Update hidden inputs and data attributes
-        const hiddenInputs = card.querySelectorAll('input[type="hidden"][name*="price"], [data-price]');
-        hiddenInputs.forEach(input => {
-          if (input.tagName === 'INPUT') {
-            input.value = newPrice.replace('$', '');
-          } else {
-            input.dataset.price = newPrice.replace('$', '');
-          }
-        });
-
+      if (syncProductCard(card)) {
         updatedCount++;
       }
     });
 
     if (updatedCount > 0) {
-      console.log(`[PriceSync] Updated ${updatedCount} product prices`);
+      console.log(`💰 [SheetsSync] Updated ${updatedCount} product cards with live prices`);
     }
+
+    return updatedCount;
   };
 
-  // Update cart prices
-  const updateCartPrices = () => {
+  // Enhanced cart price sync
+  const syncCartPrices = () => {
     const cartEl = document.querySelector('[role="dialog"], [aria-modal="true"], [class*="drawer"], [data-cart]');
-    if (!cartEl) return;
+    if (!cartEl) return 0;
 
     const cartItems = [...cartEl.querySelectorAll('*')].filter(el =>
       /^Expiration:/i.test(el.textContent?.trim() || '')
@@ -235,97 +284,154 @@
     let cartUpdated = 0;
 
     cartItems.forEach(item => {
-      const container = item.closest('div');
+      const container = item.closest('div, .cart-item');
       if (!container) return;
 
-      const nameEl = container.querySelector('h1,h2,h3,h4,.title,.font-medium');
-      const priceEl = container.querySelector('*:not(button)');
-
-      if (!nameEl || !priceEl) return;
+      const nameEl = container.querySelector('h1,h2,h3,h4,.title,.font-medium,.product-name');
+      if (!nameEl) return;
 
       const name = nameEl.textContent?.trim() || '';
       const expText = item.textContent.split(':')[1]?.trim() || '';
       const expiration = parseExpirationCategory(expText);
 
       const normalizedName = normalizeProductName(name);
-      const prices = priceData.get(normalizedName);
+      const productInfo = productData.get(normalizedName);
 
-      if (prices) {
-        const newPrice = prices[expiration] || prices['9+'];
-        if (newPrice && priceEl.textContent?.includes('$')) {
-          priceEl.textContent = priceEl.textContent.replace(/\$[\d.]+/, newPrice);
-          cartUpdated++;
+      if (productInfo) {
+        const newPrice = productInfo.prices[expiration] || productInfo.prices['9+'];
+        if (newPrice > 0) {
+          const newPriceText = formatPrice(newPrice);
+
+          // Update all price elements in cart item
+          const priceElements = container.querySelectorAll('*');
+          priceElements.forEach(el => {
+            if (el.textContent?.includes('
+
+</body>
+
+</html>
+) && !/button/i.test(el.tagName)) {
+              const oldText = el.textContent;
+              const newText = oldText.replace(/\$[\d.]+/, newPriceText);
+              if (oldText !== newText) {
+                el.textContent = newText;
+                cartUpdated++;
+              }
+            }
+          });
+
+          // Update cart data attributes and inputs
+          const cartInputs = container.querySelectorAll('input[type="hidden"], [data-price]');
+          cartInputs.forEach(input => {
+            if (input.value && input.value !== String(newPrice)) {
+              input.value = String(newPrice);
+            }
+            if (input.dataset && input.dataset.price !== String(newPrice)) {
+              input.dataset.price = String(newPrice);
+            }
+          });
         }
       }
     });
 
     if (cartUpdated > 0) {
-      console.log(`[PriceSync] Updated ${cartUpdated} cart items`);
+      console.log(`🛒 [SheetsSync] Updated ${cartUpdated} cart items`);
     }
+
+    return cartUpdated;
   };
 
   // Main sync function
-  const syncPrices = () => {
-    updateProductPrices();
-    updateCartPrices();
+  const performSync = () => {
+    const productUpdates = syncAllProducts();
+    const cartUpdates = syncCartPrices();
+    const totalUpdates = productUpdates + cartUpdates;
+
+    if (totalUpdates > 0) {
+      console.log(`🔄 [SheetsSync] Complete sync finished - ${totalUpdates} items updated`);
+    }
+
+    return totalUpdates;
   };
 
-  // Initialize
-  const init = async () => {
-    console.log('[PriceSync] Waiting for page content...');
+  // Initialize and start syncing
+  const initialize = async () => {
+    console.log('🎯 [SheetsSync] Initializing...');
 
-    // Wait for products to load
+    // Initial load
+    await loadProductData();
+
+    // Wait for products to appear, then sync
     let attempts = 0;
-    const maxAttempts = 20;
+    const maxAttempts = 30;
 
-    const waitForProducts = () => {
+    const waitAndSync = () => {
       const cards = findProductCards();
-      if (cards.length > 0) {
-        console.log(`[PriceSync] Found ${cards.length} product cards`);
-        loadPriceData().then(() => {
-          syncPrices();
+      if (cards.length > 0 || attempts >= maxAttempts) {
+        console.log(`🎯 [SheetsSync] Found ${cards.length} product cards, starting sync`);
+        performSync();
 
-          // Set up periodic updates
-          setInterval(() => {
-            loadPriceData().then(syncPrices);
-          }, CONFIG.UPDATE_INTERVAL);
+        // Set up periodic updates
+        setInterval(async () => {
+          await loadProductData();
+          performSync();
+        }, CONFIG.UPDATE_INTERVAL);
 
-          // Watch for DOM changes
-          const observer = new MutationObserver(() => {
-            clearTimeout(observer.timer);
-            observer.timer = setTimeout(syncPrices, 500);
-          });
-
-          observer.observe(document.body, {
-            childList: true,
-            subtree: true
-          });
-
-          console.log('[PriceSync] Initialization complete');
+        // Watch for DOM changes (cart opens, product selection changes)
+        const observer = new MutationObserver(() => {
+          clearTimeout(observer.timer);
+          observer.timer = setTimeout(performSync, 1000);
         });
-      } else if (attempts < maxAttempts) {
-        attempts++;
-        setTimeout(waitForProducts, 500);
+
+        observer.observe(document.body, {
+          childList: true,
+          subtree: true
+        });
+
+        // Listen for select changes to update prices immediately
+        document.addEventListener('change', (e) => {
+          if (e.target.tagName === 'SELECT') {
+            setTimeout(performSync, 100);
+          }
+        });
+
+        console.log('✅ [SheetsSync] Initialization complete - watching for changes');
       } else {
-        console.warn('[PriceSync] Could not find product cards after waiting');
+        attempts++;
+        setTimeout(waitAndSync, 500);
       }
     };
 
-    waitForProducts();
+    waitAndSync();
   };
 
   // Start when DOM is ready
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
+    document.addEventListener('DOMContentLoaded', initialize);
   } else {
-    setTimeout(init, 100);
+    setTimeout(initialize, 100);
   }
 
-  // Expose manual sync function for debugging
-  window.PRICE_SYNC_MANUAL = () => {
-    console.log('[PriceSync] Manual sync triggered');
-    loadPriceData().then(syncPrices);
+  // Expose enhanced functions for debugging
+  window.SHEETS_SYNC = {
+    loadData: loadProductData,
+    syncProducts: performSync,
+    getProductData: () => productData,
+    findCards: findProductCards,
+    manual: async () => {
+      console.log('🔧 [SheetsSync] Manual sync triggered');
+      await loadProductData();
+      return performSync();
+    },
+    testProduct: (name) => {
+      const normalized = normalizeProductName(name);
+      const data = productData.get(normalized);
+      console.log(`Product "${name}" -> normalized: "${normalized}"`, data);
+      return data;
+    }
   };
+
+  console.log('🚀 [SheetsSync] Enhanced integration loaded - use window.SHEETS_SYNC.manual() to test');
 })();
 </script>
 
