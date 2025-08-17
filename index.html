@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <script type="module" crossorigin src="./assets/index-DfpOQ00Z.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-B0V4MThO.css">
+</head>
+
+<body>
+  <div id="root"></div>
+
+  <!-- Enhanced Google Sheets Integration - Dynamic Products & Price Sync -->
+  <script>
+  (() => {
+    // Prevent multiple runs
+    if (window.ENHANCED_SHEETS_SYNC) return;
+    window.ENHANCED_SHEETS_SYNC = true;
+
+    console.log('[SheetsSync] Enhanced Google Sheets integration starting...');
+
+    // Configuration
+    const CONFIG = {
+      CSV_URL: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQKyuGyVeB6_EMydb8kxP0wiZXyxVFsaaNiM0w6yMj5w4tGomMNWn6glhqlfDJd1laA583L1EL91ZA3/pub?output=csv',
+      UPDATE_INTERVAL: 60000, // 1 minute for better sync
+      MAX_RETRIES: 3
+    };
+
+    // State
+    let productData = new Map();
+    let isLoading = false;
+    let retryCount = 0;
+
+    // Utility functions
+    const normalizeProductName = (name) => {
+      return (name || '').toLowerCase()
+        .replace(/™|®/g, '')
+        .replace(/[^a-z0-9]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    };
+
+    const parsePrice = (priceStr) => {
+      const num = Number(String(priceStr).replace(/[^0-9.]/g, ''));
+      return isNaN(num) ? 0 : num;
+    };
+
+    const formatPrice = (price) => {
+      return `$${Number(price).toFixed(2)}`;
+    };
+
+    const parseExpirationCategory = (text) => {
+      if (!text) return '9+';
+      const t = text.toLowerCase();
+      if (t.includes('6 month')) return '6';
+      if (t.includes('7') || t.includes('8')) return '7-8';
+      return '9+';
+    };
+
+    // Enhanced product finder - works with dynamic products
+    const findProductCards = () => {
+      // Look for cards with data-product-card attribute first (dynamic products)
+      let cards = [...document.querySelectorAll('[data-product-card]')];
+
+      // Fallback to finding cards by "Add to Sale" buttons
+      if (cards.length === 0) {
+        const buttons = [...document.querySelectorAll('button')]
+          .filter(btn => /add to sale/i.test(btn.textContent || ''));
+
+        cards = buttons.map(btn => {
+          let card = btn.closest('[data-product-card], .product-card, .bg-white, .card');
+          if (!card) {
+            card = btn.parentElement;
+            for (let i = 0; i < 5 && card; i++) {
+              if (card.querySelector('h3, h4, .title, [data-product-name], .product-name')) break;
+              card = card.parentElement;
+            }
+          }
+          return card;
+        }).filter(card => card);
+      }
+
+      return cards;
+    };
+
+    const getProductInfo = (card) => {
+      const nameEl = card.querySelector('[data-product-name], .product-name, .card-title, h3, h4, .title');
+      const priceEl = card.querySelector('[data-price], .price, .product-price, .text-green-600, .text-green-700, .text-success');
+      const selectEl = card.querySelector('select');
+
+      if (!nameEl) return null;
+
+      const name = nameEl.textContent?.trim() || '';
+      const selectedValue = selectEl?.value || selectEl?.options?.[selectEl?.selectedIndex]?.value;
+      let expiration = '9+ months until expiration';
+
+      if (selectEl) {
+        const selectedOption = selectEl.options[selectEl.selectedIndex];
+        if (selectedOption) {
+          expiration = selectedOption.textContent || selectedOption.value || expiration;
+        }
+      }
+
+      return { nameEl, priceEl, selectEl, name, expiration, selectedValue, card };
+    };
+
+    // Load and parse CSV data
+    const loadProductData = async () => {
+      if (isLoading) return;
+      isLoading = true;
+
+      try {
+        console.log('[SheetsSync] Fetching data from Google Sheets...');
+        const response = await fetch(`${CONFIG.CSV_URL}&cb=${Date.now()}`);
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const csvText = await response.text();
+        const lines = csvText.split('\n').filter(line => line.trim());
+        if (lines.length < 2) throw new Error('Invalid CSV data');
+
+        const headers = lines[0].split(',').map(h => h.trim());
+        productData.clear();
+
+        for (let i = 1; i < lines.length; i++) {
+          const values = lines[i].split(',').map(v => v.trim());
+          const row = {};
+          headers.forEach((header, index) => {
+            row[header] = values[index] || '';
+          });
+
+          const productName = row['Product_Name'] || row['product_name'] || row['name'] || row['Product'];
+          if (!productName) continue;
+
+          const normalized = normalizeProductName(productName);
+          const prices = {
+            '6': parsePrice(row['6 months until expiration'] || row['6'] || row['6_months']),
+            '7-8': parsePrice(row['7-8 months until expiration'] || row['7-8'] || row['7_to_8']),
+            '9+': parsePrice(row['9+ months until expiration'] || row['9+'] || row['9_plus'])
+          };
+
+          // Only store products with at least one valid price
+          if (prices['6'] > 0 || prices['7-8'] > 0 || prices['9+'] > 0) {
+            productData.set(normalized, {
+              name: productName.trim(),
+              prices,
+              rawRow: row
+            });
+          }
+        }
+
+        console.log(`[SheetsSync] Loaded ${productData.size} products from Google Sheets`);
+        retryCount = 0;
+
+        // Trigger React component update
+        window.dispatchEvent(new CustomEvent('sheetsDataUpdated', {
+          detail: { productCount: productData.size }
+        }));
+
+      } catch (error) {
+        console.error('[SheetsSync] Error loading data:', error);
+        retryCount++;
+
+        if (retryCount < CONFIG.MAX_RETRIES) {
+          console.log(`[SheetsSync] Retrying in 5 seconds... (${retryCount}/${CONFIG.MAX_RETRIES})`);
+          setTimeout(loadProductData, 5000);
+        }
+      } finally {
+        isLoading = false;
+      }
+    };
+
+    // Update product card prices with Google Sheets data
+    const syncProductCard = (card) => {
+      const info = getProductInfo(card);
+      if (!info) return false;
+
+      const { name, expiration, priceEl, selectEl, selectedValue } = info;
+      const normalizedName = normalizeProductName(name);
+      const expirationCategory = parseExpirationCategory(expiration);
+
+      // Find matching product data
+      let productInfo = productData.get(normalizedName);
+
+      // Fuzzy matching if exact match not found
+      if (!productInfo) {
+        const nameTokens = normalizedName.split(' ').filter(Boolean);
+        let bestMatch = null;
+        let bestScore = 0;
+
+        for (const [key, value] of productData) {
+          let score = 0;
+          nameTokens.forEach(token => {
+            if (key.includes(token) || token.includes(key.split(' ')[0])) {
+              score += token.length > 2 ? 2 : 1;
+            }
+          });
+
+          if (score > bestScore && score > 1) {
+            bestScore = score;
+            bestMatch = value;
+          }
+        }
+
+        productInfo = bestMatch;
+      }
+
+      if (!productInfo) return false;
+
+      const newPrice = productInfo.prices[expirationCategory] || productInfo.prices['9+'];
+      if (newPrice <= 0) return false;
+
+      let updated = false;
+
+      // Update price display
+      if (priceEl) {
+        const currentText = priceEl.textContent?.trim() || '';
+        const newPriceText = formatPrice(newPrice);
+        if (currentText !== newPriceText) {
+          priceEl.textContent = newPriceText;
+          priceEl.dataset.price = String(newPrice);
+          updated = true;
+        }
+      }
+
+      // Update select dropdown options with current prices
+      if (selectEl) {
+        for (const option of selectEl.options) {
+          const optionExpiration = parseExpirationCategory(option.textContent);
+          const optionPrice = productInfo.prices[optionExpiration];
+          if (optionPrice > 0) {
+            const baseText = option.textContent.replace(/\s*-\s*\$[\d.]+$/, '').trim();
+            const newOptionText = `${baseText} - ${formatPrice(optionPrice)}`;
+            if (option.textContent !== newOptionText) {
+              option.textContent = newOptionText;
+              option.value = String(optionPrice);
+              updated = true;
+            }
+          }
+        }
+      }
+
+      // Update hidden inputs and data attributes
+      const hiddenInputs = card.querySelectorAll('input[type="hidden"]');
+      hiddenInputs.forEach(input => {
+        if (input.name && input.name.includes('price')) {
+          if (input.value !== String(newPrice)) {
+            input.value = String(newPrice);
+            updated = true;
+          }
+        }
+      });
+
+      // Update card data attributes
+      if (card.dataset.price !== String(newPrice)) {
+        card.dataset.price = String(newPrice);
+        updated = true;
+      }
+
+      return updated;
+    };
+
+    // Sync all product cards
+    const syncAllProducts = () => {
+      if (productData.size === 0) return;
+
+      const cards = findProductCards();
+      let updatedCount = 0;
+
+      cards.forEach(card => {
+        if (syncProductCard(card)) {
+          updatedCount++;
+        }
+      });
+
+      if (updatedCount > 0) {
+        console.log(`[SheetsSync] Updated ${updatedCount} product cards`);
+      }
+
+      return updatedCount;
+    };
+
+    // Sync cart prices
+    const syncCartPrices = () => {
+      const cartEl = document.querySelector('[role="dialog"], [aria-modal="true"], [class*="drawer"], [data-cart]');
+      if (!cartEl) return 0;
+
+      const cartItems = [...cartEl.querySelectorAll('*')].filter(el =>
+        /^Expiration:/i.test(el.textContent?.trim() || '')
+      );
+
+      let cartUpdated = 0;
+
+      cartItems.forEach(item => {
+        const container = item.closest('div');
+        if (!container) return;
+
+        const nameEl = container.querySelector('h1,h2,h3,h4,.title,.font-medium');
+        const priceEls = container.querySelectorAll('*:not(button)');
+
+        if (!nameEl) return;
+
+        const name = nameEl.textContent?.trim() || '';
+        const expText = item.textContent.split(':')[1]?.trim() || '';
+        const expiration = parseExpirationCategory(expText);
+
+        const normalizedName = normalizeProductName(name);
+        const productInfo = productData.get(normalizedName);
+
+        if (productInfo) {
+          const newPrice = productInfo.prices[expiration] || productInfo.prices['9+'];
+          if (newPrice > 0) {
+            const newPriceText = formatPrice(newPrice);
+            priceEls.forEach(priceEl => {
+              if (priceEl.textContent?.includes('$')) {
+                const oldText = priceEl.textContent;
+                const newText = oldText.replace(/\$[\d.]+/, newPriceText);
+                if (oldText !== newText) {
+                  priceEl.textContent = newText;
+                  cartUpdated++;
+                }
+              }
+            });
+          }
+        }
+      });
+
+      if (cartUpdated > 0) {
+        console.log(`[SheetsSync] Updated ${cartUpdated} cart items`);
+      }
+
+      return cartUpdated;
+    };
+
+    // Main sync function
+    const performSync = () => {
+      const productUpdates = syncAllProducts();
+      const cartUpdates = syncCartPrices();
+      return productUpdates + cartUpdates;
+    };
+
+    // Initialize and start syncing
+    const initialize = async () => {
+      console.log('[SheetsSync] Initializing...');
+
+      // Initial load
+      await loadProductData();
+
+      // Wait for products to appear, then sync
+      let attempts = 0;
+      const maxAttempts = 30;
+
+      const waitAndSync = () => {
+        const cards = findProductCards();
+        if (cards.length > 0 || attempts >= maxAttempts) {
+          console.log(`[SheetsSync] Found ${cards.length} product cards, starting sync`);
+          performSync();
+
+          // Set up periodic updates
+          setInterval(async () => {
+            await loadProductData();
+            performSync();
+          }, CONFIG.UPDATE_INTERVAL);
+
+          // Watch for DOM changes (SPA navigation, cart updates, etc.)
+          const observer = new MutationObserver(() => {
+            clearTimeout(observer.timer);
+            observer.timer = setTimeout(performSync, 1000);
+          });
+
+          observer.observe(document.body, {
+            childList: true,
+            subtree: true
+          });
+
+          console.log('[SheetsSync] Initialization complete');
+        } else {
+          attempts++;
+          setTimeout(waitAndSync, 500);
+        }
+      };
+
+      waitAndSync();
+    };
+
+    // Start when DOM is ready
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initialize);
+    } else {
+      setTimeout(initialize, 100);
+    }
+
+    // Expose functions for debugging and manual control
+    window.SHEETS_SYNC = {
+      loadData: loadProductData,
+      syncProducts: performSync,
+      getProductData: () => productData,
+      findCards: findProductCards,
+      manual: async () => {
+        console.log('[SheetsSync] Manual sync triggered');
+        await loadProductData();
+        return performSync();
+      }
+    };
+  })();
+  </script>
+</body>
+
+</html>
